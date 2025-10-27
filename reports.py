@@ -1,55 +1,290 @@
-from fastapi import APIRouter, Depends, Request, HTTPException
-from fastapi.responses import StreamingResponse
 from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-from jose import JWTError
-from auth import get_current_user, verify_token
-from risk_engine import get_analysis
-
-router = APIRouter(prefix="/api", tags=["report"])
+from reportlab.lib import colors
+from reportlab.lib.units import mm
 
 def build_pdf(analysis) -> BytesIO:
+    """
+    Gera um PDF mais atrativo / executive-style
+    mantendo apenas reportlab (sem libs extra).
+    """
+
     buffer = BytesIO()
     p = canvas.Canvas(buffer, pagesize=A4)
-    y = 800
-    lines = [
-        "CHECK INSURANCE RISK - RELATÓRIO TÉCNICO",
-        "---------------------------------------",
+
+    PAGE_W, PAGE_H = A4
+    margin_left = 20 * mm
+    margin_right = 20 * mm
+    cursor_y = PAGE_H - 20 * mm  # vamos descendo este cursor
+
+    # =========================
+    # 1. HEADER VISUAL
+    # =========================
+    header_height = 22 * mm
+    p.setFillColorRGB(0.07, 0.1, 0.18)  # #121A2E-ish (dark blue/grey)
+    p.rect(0, PAGE_H - header_height, PAGE_W, header_height, fill=1, stroke=0)
+
+    # Branding
+    p.setFillColor(colors.white)
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(margin_left, PAGE_H - 10 * mm,
+                 "CHECK INSURANCE RISK")
+
+    p.setFont("Helvetica", 8.5)
+    p.setFillColorRGB(0.55, 0.8, 1)  # azul clarinho
+    p.drawString(margin_left, PAGE_H - 14.5 * mm,
+                 "Motor de Compliance e Suporte Técnico de Subscrição")
+
+    # Linha fina azul abaixo do header
+    p.setStrokeColorRGB(0.55, 0.8, 1)
+    p.setLineWidth(0.6)
+    p.line(margin_left, PAGE_H - header_height,
+           PAGE_W - margin_right, PAGE_H - header_height)
+
+    cursor_y = PAGE_H - header_height - 8 * mm
+
+    # =========================
+    # 2. METADADOS DA CONSULTA
+    # =========================
+    p.setFillColor(colors.black)
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(margin_left, cursor_y,
+                 "Dados da Consulta")
+    cursor_y -= 6 * mm
+
+    p.setFont("Helvetica", 9)
+    meta_lines = [
         f"Consulta ID: {analysis.consulta_id}",
         f"Data/Hora (UTC): {analysis.timestamp}",
-        f"Identificador: {analysis.identifier}",
-        f"Tipo Identificador: {analysis.identifier_type}",
-        f"Score Final: {analysis.score_final}/100",
-        f"Decisão: {analysis.decisao}",
-        f"Justificação: {analysis.justificacao}",
-        f"Alerta Sanções: {'SIM' if analysis.sanctions_alert else 'NÃO'}",
-        f"Alerta PEP: {'SIM' if analysis.pep_alert else 'NÃO'}",
-        "Assinatura técnica: Check Insurance Risk - Motor de Compliance"
+        f"Identificador analisado: {analysis.identifier}",
+        f"Tipo de Identificador: {analysis.identifier_type}",
     ]
-    for line in lines:
-        p.drawString(50, y, line); y -= 20
-    p.showPage(); p.save(); buffer.seek(0)
+
+    for line in meta_lines:
+        p.drawString(margin_left, cursor_y, line)
+        cursor_y -= 5.2 * mm
+
+    cursor_y -= 4 * mm
+
+    # Linha separadora
+    p.setStrokeColor(colors.grey)
+    p.setLineWidth(0.3)
+    p.line(margin_left, cursor_y,
+           PAGE_W - margin_right, cursor_y)
+    cursor_y -= 8 * mm
+
+    # =========================
+    # 3. RESUMO EXECUTIVO / RISCO
+    # =========================
+    # Cartão de risco com cor dependendo da decisão
+    # regras simples:
+    # - "Escalar" ou "Risco Elevado" => vermelho
+    # - "Aceitar c/ Condições" => amarelo
+    # - "Aceitar" => verde
+    decisao_txt = (analysis.decisao or "").lower()
+
+    if "escalar" in decisao_txt or "elevado" in decisao_txt or "recusar" in decisao_txt:
+        box_color = colors.Color(0.95, 0.27, 0.27)  # vermelho suave
+        box_text_color = colors.white
+        risco_label = "Risco Elevado"
+    elif "condi" in decisao_txt:
+        box_color = colors.Color(0.98, 0.87, 0.3)   # amarelo
+        box_text_color = colors.black
+        risco_label = "Risco Moderado"
+    else:
+        box_color = colors.Color(0.36, 0.83, 0.50)  # verde
+        box_text_color = colors.black
+        risco_label = "Risco Controlado"
+
+    box_h = 22 * mm
+    box_w = PAGE_W - margin_left - margin_right
+    box_y = cursor_y - box_h
+
+    p.setFillColor(box_color)
+    p.roundRect(margin_left, box_y, box_w, box_h, 4 * mm, fill=1, stroke=0)
+
+    p.setFillColor(box_text_color)
+    p.setFont("Helvetica-Bold", 11)
+    p.drawString(margin_left + 6 * mm, box_y + box_h - 7 * mm,
+                 risco_label)
+
+    p.setFont("Helvetica", 9)
+    p.drawString(margin_left + 6 * mm, box_y + box_h - 12 * mm,
+                 f"Score Final: {analysis.score_final}/100")
+
+    p.drawString(margin_left + 6 * mm, box_y + box_h - 16.5 * mm,
+                 f"Decisão Recomendada: {analysis.decisao}")
+
+    # flags PEP / Sanções numa linha
+    flags_txt = []
+    if getattr(analysis, "pep_alert", False):
+        flags_txt.append("PEP")
+    if getattr(analysis, "sanctions_alert", False):
+        flags_txt.append("Listas de Sanções")
+    if not flags_txt:
+        flags_line = "Sem alertas PEP / Sanções"
+    else:
+        flags_line = "Alertas: " + " / ".join(flags_txt)
+
+    p.drawString(margin_left + 6 * mm, box_y + box_h - 21 * mm,
+                 flags_line)
+
+    cursor_y = box_y - 10 * mm
+
+    # =========================
+    # 4. DETALHES TÉCNICOS
+    # =========================
+    p.setFillColor(colors.black)
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(margin_left, cursor_y, "Detalhes Técnicos")
+    cursor_y -= 6 * mm
+
+    p.setFont("Helvetica", 9)
+
+    detalhes = [
+        ("Score Final", f"{analysis.score_final}/100"),
+        ("Decisão Recomendada", f"{analysis.decisao}"),
+        ("Justificação Técnica", f"{analysis.justificacao}"),
+        ("Alerta Sanções", "SIM" if analysis.sanctions_alert else "NÃO"),
+        ("Alerta PEP / Exposição Política", "SIM" if analysis.pep_alert else "NÃO")
+    ]
+
+    # desenhar “tabela” leve
+    col_key_w = 60 * mm
+    col_val_w = PAGE_W - margin_left - margin_right - col_key_w
+    row_h = 8 * mm
+
+    for label_text, value_text in detalhes:
+        if cursor_y - row_h < 25 * mm:  # quase no rodapé -> nova página
+            # rodapé antes de saltar
+            _draw_footer(p, PAGE_W, margin_left, margin_right)
+            p.showPage()
+            cursor_y = PAGE_H - 25 * mm  # nova página topo útil
+            # repetir título da secção se quebrar página
+            p.setFont("Helvetica-Bold", 10)
+            p.drawString(margin_left, cursor_y, "Detalhes Técnicos (cont.)")
+            cursor_y -= 8 * mm
+            p.setFont("Helvetica", 9)
+
+        # label background (cinza escuro)
+        p.setFillColorRGB(0.11, 0.14, 0.2)
+        p.rect(margin_left, cursor_y - row_h + 1.5 * mm,
+               col_key_w, row_h, fill=1, stroke=0)
+
+        p.setFillColor(colors.white)
+        p.setFont("Helvetica-Bold", 8.5)
+        p.drawString(margin_left + 3 * mm, cursor_y - 3 * mm, label_text)
+
+        # value background (caixa cinza mais clara)
+        p.setFillColorRGB(0.17, 0.2, 0.28)
+        p.rect(margin_left + col_key_w, cursor_y - row_h + 1.5 * mm,
+               col_val_w, row_h, fill=1, stroke=0)
+
+        p.setFillColor(colors.white)
+        p.setFont("Helvetica", 8.5)
+
+        # Quebra de linha simples caso value_text seja longo
+        wrapped = wrap_text(value_text, max_chars=60)
+        line_y = cursor_y - 3 * mm
+        for line in wrapped:
+            p.drawString(margin_left + col_key_w + 3 * mm, line_y, line)
+            line_y -= 4 * mm
+
+        # ajustar cursor_y para próxima linha da tabela
+        cursor_y -= row_h + (max(0, (len(wrapped)-1)) * 4 * mm)
+
+        cursor_y -= 2 * mm  # espaçamento extra entre linhas
+
+    cursor_y -= 4 * mm
+
+    # linha separadora antes das notas finais
+    p.setStrokeColor(colors.grey)
+    p.setLineWidth(0.3)
+    p.line(margin_left, cursor_y, PAGE_W - margin_right, cursor_y)
+    cursor_y -= 8 * mm
+
+    # =========================
+    # 5. NOTAS / CONFORMIDADE
+    # =========================
+    p.setFillColor(colors.black)
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(margin_left, cursor_y, "Notas e Conformidade")
+    cursor_y -= 6 * mm
+
+    p.setFont("Helvetica", 8.5)
+    p.setFillColor(colors.black)
+
+    obs_lines = [
+        "Esta análise resulta da consolidação de fontes internas e externas autorizadas",
+        "pela seguradora. O score técnico e a decisão recomendada servem como apoio à",
+        "subscrição e compliance, e não substituem a avaliação humana em casos de risco",
+        "elevado ou quando existam alertas PEP / sanções.",
+        "",
+        "Assinatura técnica:",
+        "Check Insurance Risk — Motor de Compliance",
+    ]
+
+    for line in obs_lines:
+        if cursor_y < 30 * mm:
+            _draw_footer(p, PAGE_W, margin_left, margin_right)
+            p.showPage()
+            cursor_y = PAGE_H - 25 * mm
+            p.setFont("Helvetica", 8.5)
+            p.setFillColor(colors.black)
+        p.drawString(margin_left, cursor_y, line)
+        cursor_y -= 5 * mm
+
+    # =========================
+    # 6. RODAPÉ CONFIDENCIAL
+    # =========================
+    _draw_footer(p, PAGE_W, margin_left, margin_right)
+
+    p.showPage()
+    p.save()
+    buffer.seek(0)
     return buffer
 
-@router.get("/report/{consulta_id}")
-def get_report(consulta_id: str, request: Request, token: str = None):
-    # aceitar token passado via query string (?token=...)
-    if not token:
-        token = request.query_params.get("token")
 
-    if not token:
-        # sem token? rejeita como não autenticado
-        raise HTTPException(status_code=401, detail="Not authenticated")
+def wrap_text(text, max_chars=60):
+    """
+    Simples quebra de linha por comprimento aproximado.
+    """
+    if text is None:
+        return [""]
+    words = str(text).split()
+    lines = []
+    cur = []
+    cur_len = 0
+    for w in words:
+        wlen = len(w) + 1  # espaço
+        if cur_len + wlen > max_chars:
+            lines.append(" ".join(cur))
+            cur = [w]
+            cur_len = len(w)
+        else:
+            cur.append(w)
+            cur_len += wlen
+    if cur:
+        lines.append(" ".join(cur))
+    return lines
 
-    try:
-        verify_token(token)  # valida assinatura / expiração
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token inválido")
 
-    analysis = get_analysis(consulta_id)
-    pdf_buffer = build_pdf(analysis)
-    headers = {
-        "Content-Disposition": f'attachment; filename="relatorio_{consulta_id}.pdf"'
-    }
-    return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
+def _draw_footer(p, PAGE_W, margin_left, margin_right):
+    """
+    Rodapé padrão em todas as páginas:
+    caixa cinza com 'CONFIDENCIAL / USO INTERNO'.
+    """
+    footer_h = 10 * mm
+    footer_y = 10 * mm
+
+    p.setFillColorRGB(0.15, 0.18, 0.25)
+    p.rect(0, 0, PAGE_W, footer_h + footer_y, fill=1, stroke=0)
+
+    p.setFillColorRGB(0.55, 0.8, 1)
+    p.setFont("Helvetica-Bold", 8)
+    p.drawRightString(
+        PAGE_W - margin_right,
+        footer_y + 3 * mm,
+        "CONFIDENCIAL • USO INTERNO"
+    )
