@@ -33,14 +33,19 @@ def build_pdf(analysis) -> BytesIO:
     return buffer
 
 @router.get("/report/{consulta_id}")
-def get_report(consulta_id: str, request: Request, token: str = None, user=Depends(get_current_user)):
+def get_report(consulta_id: str, request: Request, token: str = None):
+    # aceitar token passado via query string (?token=...)
     if not token:
         token = request.query_params.get("token")
-    if token:
-        try:
-            verify_token(token)
-        except JWTError:
-            raise HTTPException(status_code=401, detail="Token inválido")
+
+    if not token:
+        # sem token? rejeita como não autenticado
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        verify_token(token)  # valida assinatura / expiração
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token inválido")
 
     analysis = get_analysis(consulta_id)
     pdf_buffer = build_pdf(analysis)
