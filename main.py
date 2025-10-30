@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -370,9 +369,9 @@ def generate_pdf(consulta_id_raw: int, data: Dict):
     bloco_conf = (
         "Esta análise resulta da consolidação de fontes internas e externas autorizadas pela seguradora. "
         "O score técnico e a decisão recomendada servem como apoio à subscrição e compliance e não substituem "
-        "a avaliação humana em casos de risco elevado, suspeita de fraude ou quando existam alertas PEP / sanções.\\n\\n"
-        "Assinatura técnica:\\n"
-        "Check Insurance Risk — Motor de Compliance\\n\\n"
+        "a avaliação humana em casos de risco elevado, suspeita de fraude ou quando existam alertas PEP / sanções.\n\n"
+        "Assinatura técnica:\n"
+        "Check Insurance Risk — Motor de Compliance\n\n"
         "CONFIDENCIAL • USO INTERNO"
     )
 
@@ -639,3 +638,4 @@ def admin_delete_source(
 
     SOURCES_STORE.pop(index)
     return {"status": "deleted", "index": index}
+
