@@ -638,4 +638,3 @@ def admin_delete_source(
 
     SOURCES_STORE.pop(index)
     return {"status": "deleted", "index": index}
-
