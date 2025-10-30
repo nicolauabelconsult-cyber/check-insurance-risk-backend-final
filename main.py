@@ -190,17 +190,39 @@ def health():
 # LOGIN
 # =========================================================
 
+from pydantic import BaseModel, EmailStr
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+class LoginResponse(BaseModel):
+    access_token: str
+    user_name: str
+    role: str
+
+# Garante que as chaves do dicionário USERS estão em lower-case:
+# USERS = {
+#   "admin@checkrisk.com": UserObj(name="Admin", email="admin@checkrisk.com", password="admin123", role="admin"),
+#   ...
+# }
+
 @app.post("/api/login", response_model=LoginResponse)
 def login(body: LoginRequest):
-    """index.html faz POST /api/login. Devolve access_token = email, user_name, role."""
-    user = USERS.get(body.email)
-    if not user or user.password != body.password:
+    """index.html -> POST /api/login. Retorna access_token=email, user_name, role."""
+    email = body.email.strip().lower()
+    password = body.password.strip()
+
+    user = USERS.get(email)  # <- chaves em lower no USERS
+    if not user or user.password != password:
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
+
     return LoginResponse(
-        access_token=user.email,
+        access_token=user.email,  # usamos o próprio e-mail como token simples
         user_name=user.name,
         role=user.role
     )
+
 
 
 # =========================================================
