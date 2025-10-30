@@ -166,6 +166,17 @@ app.add_middleware(
 )
 
 
+# ======================================================
+# ROTA DE SAÚDE / MONITORAMENTO
+# ======================================================
+@app.get("/api/health")
+def health_check():
+    """
+    Endpoint simples para verificar se o backend está operacional.
+    Retorna {"status": "ok"} quando o serviço está ativo.
+    """
+    return {"status": "ok"}
+
 # =========================================================
 # SAÚDE DO SERVIÇO
 # =========================================================
