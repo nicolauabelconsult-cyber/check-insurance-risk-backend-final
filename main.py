@@ -1,197 +1,46 @@
-from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form
+# main.py
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import Optional, Dict, List
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, EmailStr
+from typing import List, Optional, Dict, Any
 from datetime import datetime
-import itertools
+import io
 import os
-import shutil
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.utils import simpleSplit
+import random
 
-# =========================================================
-# CONTADORES E HELPERS
-# =========================================================
-
-_user_id_counter = itertools.count(1)
-_consulta_id_counter = itertools.count(100000)
-_risk_id_counter = itertools.count(1)
-
-
-def next_user_id():
-    return next(_user_id_counter)
-
-
-def next_consulta_id_raw() -> int:
-    return next(_consulta_id_counter)
-
-
-def format_consulta_id_display(raw_id: int) -> str:
-    # ex: 100123 -> "CIR-100123"
-    return f"CIR-{raw_id}"
-
-
-def next_risk_id():
-    return next(_risk_id_counter)
-
-
-def now_ts():
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-# =========================================================
-# ESTRUTURAS EM MEMÓRIA
-# =========================================================
-
-class User(BaseModel):
-    id: int
-    name: str
-    email: str
-    password: str
-    role: str  # "admin", "analyst", etc.
-
-
-USERS: Dict[str, User] = {}
-
-
-def bootstrap_admin():
-    # utilizador admin inicial
-    if "admin@checkrisk.com" not in USERS:
-        USERS["admin@checkrisk.com"] = User(
-            id=next_user_id(),
-            name="Administrador",
-            email="admin@checkrisk.com",
-            password="admin123",
-            role="admin"
-        )
-    # utilizador analista inicial
-    if "analyst@checkrisk.com" not in USERS:
-        USERS["analyst@checkrisk.com"] = User(
-            id=next_user_id(),
-            name="Analista Técnico",
-            email="analyst@checkrisk.com",
-            password="analyst123",
-            role="analyst"
-        )
-
-
-bootstrap_admin()
-
-# CONSULTAS guarda cada análise feita no dashboard
-# chave = consulta_id_raw (int)   valor = dict
-CONSULTAS: Dict[int, Dict] = {}
-
-# base manual de risco gravada na área admin
-RISK_DATA_STORE: List[Dict] = []
-
-# fontes de informação gravadas na área admin
-SOURCES_STORE: List[Dict] = []
-
-# garantir pastas
-os.makedirs("reports", exist_ok=True)
-os.makedirs("uploads", exist_ok=True)
-
-
-# =========================================================
-# MODELOS Pydantic
-# =========================================================
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-class LoginResponse(BaseModel):
-    access_token: str
-    user_name: str
-    role: str
-
-
-class RiskCheckRequest(BaseModel):
-    # NIF / BI / NOME / PASSAPORTE / CARTAO_RESIDENTE
-    identifier: str
-    identifier_type: str  # "NIF"|"BI"|"NOME"|"PASSAPORTE"|"CARTAO_RESIDENTE"
-
-
-class RiskCheckResponse(BaseModel):
-    consulta_id: str            # "CIR-100123"
-    consulta_id_raw: int        # 100123
-    timestamp: str
-    score_final: int
-    decisao: str
-    justificacao: str
-    pep_alert: bool
-    sanctions_alert: bool
-    benchmark_internacional: str
-
-
-# =========================================================
-# AUTENTICAÇÃO E AUTORIZAÇÃO
-# =========================================================
-
-def get_current_user(authorization: Optional[str] = Header(None)):
-    # o frontend guarda cir_token = email
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Token ausente")
-    token = authorization.replace("Bearer ", "").strip()
-    user = USERS.get(token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Token inválido")
-    return user
-
-
-def require_admin(user: User):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Acesso restrito a administradores")
-
-
-# =========================================================
-# FASTAPI APP + CORS
-# =========================================================
-
+# -------------------------------------------------------------------
+# FASTAPI + CORS
+# -------------------------------------------------------------------
 app = FastAPI(
     title="Check Insurance Risk Backend (Consolidado)",
-    version="1.2",
+    version="1.3",
     description="Backend consolidado com área admin, geração de PDF profissional e suporte a passaporte/cartão de residente."
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],     # em produção restringir
+    allow_origins=[
+        "https://checkinsurancerisk.com",
+        "https://www.checkinsurancerisk.com",
+        # (opcional para testes locais)
+        "http://localhost", "http://localhost:3000", "http://127.0.0.1:5500",
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
-
-# ======================================================
-# ROTA DE SAÚDE / MONITORAMENTO
-# ======================================================
+# -------------------------------------------------------------------
+# SAÚDE
+# -------------------------------------------------------------------
 @app.get("/api/health")
 def health_check():
-    """
-    Endpoint simples para verificar se o backend está operacional.
-    Retorna {"status": "ok"} quando o serviço está ativo.
-    """
     return {"status": "ok"}
 
-# =========================================================
-# SAÚDE DO SERVIÇO
-# =========================================================
-
-@app.get("/api/health")
-def health():
-    return {"status": "ok"}
-
-
-# =========================================================
-# LOGIN
-# =========================================================
-
-from pydantic import BaseModel, EmailStr
-
+# -------------------------------------------------------------------
+# MODELOS
+# -------------------------------------------------------------------
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
@@ -201,295 +50,228 @@ class LoginResponse(BaseModel):
     user_name: str
     role: str
 
-# Garante que as chaves do dicionário USERS estão em lower-case:
-# USERS = {
-#   "admin@checkrisk.com": UserObj(name="Admin", email="admin@checkrisk.com", password="admin123", role="admin"),
-#   ...
-# }
+class RiskCheckRequest(BaseModel):
+    identifier: str
+    identifier_type: str  # NIF | BI | NOME | PASSAPORTE | CARTAO_RESIDENTE
 
-@app.post("/api/login", response_model=LoginResponse)
-def login(body: LoginRequest):
-    """index.html -> POST /api/login. Retorna access_token=email, user_name, role."""
-    email = body.email.strip().lower()
-    password = body.password.strip()
+class RiskCheckResponse(BaseModel):
+    consulta_id: str
+    consulta_id_raw: int
+    score_final: int
+    decisao: str
+    timestamp: str
 
-    user = USERS.get(email)  # <- chaves em lower no USERS
-    if not user or user.password != password:
-        raise HTTPException(status_code=401, detail="Credenciais inválidas")
+# -------------------------------------------------------------------
+# DADOS EM MEMÓRIA (ephemeral no Render, suficiente para PoC)
+# -------------------------------------------------------------------
+class User:
+    def __init__(self, name: str, email: str, password: str, role: str):
+        self.name = name
+        self.email = email
+        self.password = password
+        self.role = role
 
-    return LoginResponse(
-        access_token=user.email,  # usamos o próprio e-mail como token simples
-        user_name=user.name,
-        role=user.role
-    )
+USERS: Dict[str, User] = {
+    "admin@checkrisk.com":   User("Administrador", "admin@checkrisk.com",   "admin123",   "admin"),
+    "analyst@checkrisk.com": User("Analista",      "analyst@checkrisk.com", "analyst123", "analyst"),
+}
 
+# Base de risco (ID autoincremental)
+RISK_DATA: List[Dict[str, Any]] = []
+RISK_SEQ = 1
 
+# Fontes de informação
+INFO_SOURCES: List[Dict[str, Any]] = []
 
-# =========================================================
-# DASHBOARD: /api/risk-check
-# =========================================================
+# Resultados das consultas para gerar PDF
+LAST_RESULTS: Dict[int, Dict[str, Any]] = {}
 
-@app.post("/api/risk-check", response_model=RiskCheckResponse)
-def risk_check(body: RiskCheckRequest, current=Depends(get_current_user)):
-    """Recebe identificador + tipo. Se PASSAPORTE / CARTAO_RESIDENTE: força revisão manual.
-    Guarda resultado em CONSULTAS para depois gerar PDF."""
+UPLOAD_DIR = os.environ.get("CIR_UPLOAD_DIR", "/tmp/cir_uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-    tipo = body.identifier_type.strip().upper()
-    ident = body.identifier.strip()
-
-    # baseline
-    score_final = 72
-    decisao = "Aceitar Risco Técnico"
-    justificacao = "Baseline técnico aplicado."
-    pep_alert = False
-    sanctions_alert = False
-    benchmark = "Benchmarks internos e alertas PEP/Sanções UE/FMI."
-
-    # caso documento internacional
-    if tipo in ["PASSAPORTE", "CARTAO_RESIDENTE"]:
-        score_final = 65
-        decisao = "Escalar para Compliance"
-        justificacao = "Documento de identificação internacional. Rever KYC manualmente."
-        benchmark = "Sujeito a validação documental adicional."
-
-    consulta_id_raw = next_consulta_id_raw()
-    consulta_id_display = format_consulta_id_display(consulta_id_raw)
-    ts = now_ts()
-
-    CONSULTAS[consulta_id_raw] = {
-        "consulta_id_raw": consulta_id_raw,
-        "consulta_id_display": consulta_id_display,
-        "timestamp": ts,
-        "identifier": ident,
-        "identifier_type": tipo,
-        "score_final": score_final,
-        "decisao": decisao,
-        "justificacao": justificacao,
-        "pep_alert": pep_alert,
-        "sanctions_alert": sanctions_alert,
-        "benchmark_internacional": benchmark,
-    }
-
-    return {
-        "consulta_id": consulta_id_display,
-        "consulta_id_raw": consulta_id_raw,
-        "timestamp": ts,
-        "score_final": score_final,
-        "decisao": decisao,
-        "justificacao": justificacao,
-        "pep_alert": pep_alert,
-        "sanctions_alert": sanctions_alert,
-        "benchmark_internacional": benchmark,
-    }
-
-
-# =========================================================
-# PDF REPORT
-# =========================================================
-
-def draw_wrapped_line(c, text, x, y, max_width, leading=14, font_name="Helvetica", font_size=10):
-    """Utilitário para texto multi-linha com word wrap básico."""
-    c.setFont(font_name, font_size)
-    lines = simpleSplit(str(text), font_name, font_size, max_width)
-    for line in lines:
-        c.drawString(x, y, line)
-        y -= leading
-    return y
-
-
-def generate_pdf(consulta_id_raw: int, data: Dict):
-    """Gera PDF com blocos profissionais e rodapé de conformidade."""
-
-    pdf_path = os.path.join("reports", f"{consulta_id_raw}.pdf")
-    c = canvas.Canvas(pdf_path, pagesize=A4)
-    w, h = A4
-
-    y = h - 50
-
-    # Cabeçalho
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, y, "CHECK INSURANCE RISK")
-    y -= 16
-
-    y = draw_wrapped_line(
-        c,
-        "Motor de Compliance e Suporte Técnico de Subscrição",
-        40, y, max_width=500, leading=14, font_name="Helvetica", font_size=10
-    )
-    y -= 10
-
-    # Linha separadora
-    c.line(40, y, w - 40, y)
-    y -= 20
-
-    # Dados da Consulta
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Dados da Consulta")
-    y -= 18
-
-    y = draw_wrapped_line(c, f"Consulta ID: {data.get('consulta_id_display', '')}", 40, y, 500)
-    y = draw_wrapped_line(c, f"ID Interno: {data.get('consulta_id_raw', '')}", 40, y, 500)
-    y = draw_wrapped_line(c, f"Data/Hora (UTC): {data.get('timestamp', '')}", 40, y, 500)
-    y = draw_wrapped_line(c, f"Identificador Analisado: {data.get('identifier', '')}", 40, y, 500)
-    y = draw_wrapped_line(c, f"Tipo de Identificador: {data.get('identifier_type', '')}", 40, y, 500)
-    y -= 10
-
-    # Resumo de Risco
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Resumo de Risco")
-    y -= 18
-
-    score_final_val = data.get("score_final", "")
-    decisao_val = data.get("decisao", "")
-    pep_txt = "SIM" if data.get("pep_alert") else "NÃO"
-    sanc_txt = "SIM" if data.get("sanctions_alert") else "NÃO"
-
-    y = draw_wrapped_line(c, f"Score Final: {score_final_val}/100", 40, y, 500)
-    y = draw_wrapped_line(c, f"Decisão Recomendada: {decisao_val}", 40, y, 500)
-    y = draw_wrapped_line(c, f"Alerta PEP / Exposição Política: {pep_txt}", 40, y, 500)
-    y = draw_wrapped_line(c, f"Alerta Sanções Internacionais: {sanc_txt}", 40, y, 500)
-    y -= 10
-
-    # Detalhes Técnicos
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Detalhes Técnicos")
-    y -= 18
-
-    justificacao_val = data.get("justificacao", "")
-    benchmark_val = data.get("benchmark_internacional", "")
-
-    y = draw_wrapped_line(c, f"Justificação Técnica: {justificacao_val}", 40, y, 500)
-    y = draw_wrapped_line(c, f"Benchmark / Referência: {benchmark_val}", 40, y, 500)
-    y -= 10
-
-    # Histórico e Compliance Interno (se existir)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(40, y, "Histórico e Compliance Interno")
-    y -= 14
-
-    match_hist = None
-    for rec in RISK_DATA_STORE:
-        if data.get("identifier") in [
-            rec.get("nif", ""), rec.get("bi", ""), rec.get("passaporte", ""),
-            rec.get("cartao_residente", ""), rec.get("nome", ""),
-        ]:
-            match_hist = rec
-            break
-
-    if match_hist:
-        hist_pag = match_hist.get("historico_pagamentos", "Sem registo interno")
-        sin_tot = match_hist.get("sinistros_total", "0")
-        sin_12m = match_hist.get("sinistros_ult_12m", "0")
-        fraude_flag = "SIM" if match_hist.get("fraude_suspeita") else "NÃO"
-        fraude_com = match_hist.get("comentario_fraude", "")
-
-        y = draw_wrapped_line(c, f"Pagamentos: {hist_pag}", 40, y, 500)
-        y = draw_wrapped_line(c, f"Sinistros Totais: {sin_tot}", 40, y, 500)
-        y = draw_wrapped_line(c, f"Sinistros Últimos 12 Meses: {sin_12m}", 40, y, 500)
-        y = draw_wrapped_line(c, f"Fraude Suspeita: {fraude_flag}", 40, y, 500)
-        if fraude_com:
-            y = draw_wrapped_line(c, f"Nota Fraude: {fraude_com}", 40, y, 500)
-    else:
-        y = draw_wrapped_line(c, "Sem histórico interno associado a este identificador.", 40, y, 500)
-
-    y -= 10
-
-    # Notas e Conformidade
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Notas e Conformidade")
-    y -= 18
-
-    bloco_conf = (
-        "Esta análise resulta da consolidação de fontes internas e externas autorizadas pela seguradora. "
-        "O score técnico e a decisão recomendada servem como apoio à subscrição e compliance e não substituem "
-        "a avaliação humana em casos de risco elevado, suspeita de fraude ou quando existam alertas PEP / sanções.\n\n"
-        "Assinatura técnica:\n"
-        "Check Insurance Risk — Motor de Compliance\n\n"
-        "CONFIDENCIAL • USO INTERNO"
-    )
-
-    y = draw_wrapped_line(c, bloco_conf, 40, y, 500)
-
-    c.showPage()
-    c.save()
-    return pdf_path
-
-
-@app.get("/api/report/{consulta_id_raw}")
-def get_report(consulta_id_raw: int, token: str):
-    """acesso.html chama: /api/report/{consulta_id_raw}?token={cir_token}"""
+# -------------------------------------------------------------------
+# AUTH SIMPLES (token = email do utilizador)
+# -------------------------------------------------------------------
+def get_current_user(authorization: Optional[str] = None) -> User:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Token em falta")
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Formato de Authorization inválido")
+    token = parts[1].strip().lower()
     user = USERS.get(token)
     if not user:
         raise HTTPException(status_code=401, detail="Token inválido")
+    return user
 
-    data = CONSULTAS.get(consulta_id_raw)
+# -------------------------------------------------------------------
+# LOGIN
+# -------------------------------------------------------------------
+@app.post("/api/login", response_model=LoginResponse)
+def login(body: LoginRequest):
+    email = body.email.strip().lower()
+    password = body.password.strip()
+    user = USERS.get(email)
+    if not user or user.password != password:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas")
+    return LoginResponse(access_token=user.email, user_name=user.name, role=user.role)
+
+# -------------------------------------------------------------------
+# LÓGICA DE RISCO (mock com regras alinhadas ao combinado)
+# -------------------------------------------------------------------
+def calcular_score_e_decisao(identifier: str, identifier_type: str) -> (int, str):
+    idt = (identifier_type or "").upper()
+    # Regra: documentos internacionais escalam para compliance e ~score 65
+    if idt in ("PASSAPORTE", "CARTAO_RESIDENTE"):
+        return 65, "Escalar para Compliance"
+    # Para NIF/BI/NOME criamos regra simples determinística:
+    seed = sum(ord(c) for c in (identifier.strip() + idt))
+    random.seed(seed)
+    base = random.randint(20, 95)
+    # Se houver “alertas” na base de risco, penaliza/eleva
+    alerta = False
+    for r in RISK_DATA:
+        ids = [r.get("nif",""), r.get("bi",""), r.get("nome",""), r.get("passaporte",""), r.get("cartao_residente","")]
+        if identifier.strip() in ids:
+            alerta = (r.get("pep_alert") == "1" or r.get("sanctions_alert") == "1" or r.get("fraude_suspeita") == "1")
+            break
+    if alerta:
+        base = max(base, 70)
+    decisao = "Aprovar" if base >= 60 else "Rever Manualmente"
+    return base, decisao
+
+def gerar_consulta_id(n: int) -> str:
+    return f"CIR-{n:05d}"
+
+# -------------------------------------------------------------------
+# /api/risk-check
+# -------------------------------------------------------------------
+@app.post("/api/risk-check", response_model=RiskCheckResponse)
+def risk_check(req: RiskCheckRequest, user: User = Depends(get_current_user)):
+    global RISK_SEQ
+    score, decisao = calcular_score_e_decisao(req.identifier, req.identifier_type)
+    consulta_id_raw = RISK_SEQ
+    RISK_SEQ += 1
+    consulta_id = gerar_consulta_id(consulta_id_raw)
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    payload = {
+        "consulta_id": consulta_id,
+        "consulta_id_raw": consulta_id_raw,
+        "score_final": score,
+        "decisao": decisao,
+        "timestamp": ts,
+        "identifier": req.identifier,
+        "identifier_type": req.identifier_type,
+        "user": user.email,
+    }
+    LAST_RESULTS[consulta_id_raw] = payload
+    return RiskCheckResponse(**payload)
+
+# -------------------------------------------------------------------
+# /api/report/{id} – PDF profissional
+# -------------------------------------------------------------------
+def _build_pdf(data: Dict[str, Any]) -> bytes:
+    # ReportLab
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    W, H = A4
+
+    # Header
+    c.setFillColor(colors.HexColor("#0f172a"))
+    c.rect(0, H-60, W, 60, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(20*mm, H-25, "Check Insurance Risk")
+    c.setFont("Helvetica", 10)
+    c.drawRightString(W-20*mm, H-25, f"Relatório de Risco — {data['consulta_id']}")
+
+    # Bloco principal
+    c.setFillColor(colors.black)
+    y = H-90
+    def line(lbl, val):
+        nonlocal y
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(20*mm, y, str(lbl))
+        c.setFont("Helvetica", 11)
+        c.drawString(70*mm, y, str(val))
+        y -= 12
+
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(20*mm, y, "Resumo da Consulta")
+    y -= 14
+    line("Consulta ID:", data["consulta_id"])
+    line("Timestamp:",  data["timestamp"])
+    line("Analista:",   data["user"])
+    line("Identificador:", data["identifier"])
+    line("Tipo:", data["identifier_type"])
+    line("Score Final:", data["score_final"])
+    line("Decisão:", data["decisao"])
+
+    y -= 10
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(20*mm, y, "Notas de Conformidade")
+    y -= 14
+    notes = "Documentos internacionais (Passaporte/CR) são escalados automaticamente para Compliance."
+    c.setFont("Helvetica", 10)
+    for chunk in [notes[i:i+90] for i in range(0, len(notes), 90)]:
+        c.drawString(20*mm, y, chunk); y -= 12
+
+    # Footer
+    c.setFont("Helvetica-Oblique", 9)
+    c.setFillColor(colors.gray)
+    c.drawRightString(W-10*mm, 10*mm, "Gerado automaticamente — CheckInsuranceRisk")
+
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer.read()
+
+@app.get("/api/report/{consulta_id_raw}")
+def get_report(consulta_id_raw: int, token: str):
+    # token simples: e-mail do utilizador (igual ao access_token que enviamos)
+    user = USERS.get((token or "").strip().lower())
+    if not user:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    data = LAST_RESULTS.get(consulta_id_raw)
     if not data:
         raise HTTPException(status_code=404, detail="Consulta não encontrada")
 
-    pdf_path = os.path.join("reports", f"{consulta_id_raw}.pdf")
-    if not os.path.exists(pdf_path):
-        generate_pdf(consulta_id_raw, data)
+    pdf_bytes = _build_pdf(data)
+    headers = {"Content-Disposition": f'inline; filename="{data["consulta_id"]}.pdf"'}
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers=headers)
 
-    display_id = data.get("consulta_id_display", f"CIR-{consulta_id_raw}")
-    filename = f"relatorio_{display_id}.pdf"
-
-    return FileResponse(pdf_path, media_type="application/pdf", filename=filename)
-
-
-# =========================================================
-# ÁREA ADMIN: UTILIZADORES
-# =========================================================
-
+# -------------------------------------------------------------------
+# ADMIN — Utilizadores
+# -------------------------------------------------------------------
 @app.post("/api/admin/user-add")
 def admin_user_add(
-    new_name: str = Form(""),
-    new_email: str = Form(""),
-    new_password: str = Form(""),
+    new_name: str = Form(...),
+    new_email: str = Form(...),
+    new_password: str = Form(...),
     new_role: str = Form("analyst"),
-    current=Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Cria um novo utilizador (apenas admin)."""
-    require_admin(current)
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Apenas admin")
+    email = new_email.strip().lower()
+    if email in USERS:
+        raise HTTPException(status_code=409, detail="E-mail já existe")
+    USERS[email] = User(new_name.strip(), email, new_password.strip(), new_role.strip())
+    return {"status": "ok", "user": {"email": email, "name": new_name, "role": new_role}}
 
-    if (not new_email.strip()) or (not new_password.strip()) or (not new_name.strip()):
-        raise HTTPException(status_code=422, detail="Campos obrigatórios em falta")
-
-    if new_email in USERS:
-        raise HTTPException(status_code=409, detail="Utilizador já existe")
-
-    USERS[new_email] = User(
-        id=next_user_id(),
-        name=new_name.strip(),
-        email=new_email.strip(),
-        password=new_password.strip(),
-        role=new_role.strip() or "analyst"
-    )
-
-    return {
-        "status": "created",
-        "user": {
-            "id": USERS[new_email].id,
-            "name": USERS[new_email].name,
-            "email": USERS[new_email].email,
-            "role": USERS[new_email].role,
-        }
-    }
-
-
-# =========================================================
-# ÁREA ADMIN: BASE DE RISCO MANUAL
-# =========================================================
-
-def _as_int_or_default(v: str, default_val: int = 0):
-    if v is None:
-        return default_val
-    v2 = v.strip()
-    return int(v2) if v2.isdigit() else default_val
-
-
+# -------------------------------------------------------------------
+# ADMIN — Base de Risco (CRUD)
+# -------------------------------------------------------------------
 @app.post("/api/admin/risk-data/add-record")
-def admin_add_risk_record(
-    id: str = Form(""),
+def admin_risk_add_record(
+    id: Optional[str] = Form(None),
     nome: str = Form(""),
     nif: str = Form(""),
     bi: str = Form(""),
@@ -508,118 +290,84 @@ def admin_add_risk_record(
     country_risk: str = Form(""),
     credit_rating: str = Form(""),
     kyc_confidence: str = Form(""),
-    current=Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Cria ou actualiza registo de risco manual."""
-    require_admin(current)
-
-    # UPDATE
-    if id and id.strip():
-        for rec in RISK_DATA_STORE:
-            if str(rec["id"]) == str(id.strip()):
-                rec.update({
-                    "nome": nome,
-                    "nif": nif,
-                    "bi": bi,
-                    "passaporte": passaporte,
-                    "cartao_residente": cartao_residente,
-                    "score_final": score_final,
-                    "justificacao": justificacao,
-                    "pep_alert": (pep_alert == "1"),
-                    "sanctions_alert": (sanctions_alert == "1"),
-                    "historico_pagamentos": historico_pagamentos,
-                    "sinistros_total": _as_int_or_default(sinistros_total, 0),
-                    "sinistros_ult_12m": _as_int_or_default(sinistros_ult_12m, 0),
-                    "fraude_suspeita": (fraude_suspeita == "1"),
-                    "comentario_fraude": comentario_fraude,
-                    "esg_score": esg_score,
-                    "country_risk": country_risk,
-                    "credit_rating": credit_rating,
-                    "kyc_confidence": kyc_confidence,
-                    "last_update": now_ts(),
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Apenas admin")
+    # update
+    if id and str(id).strip().isdigit():
+        rec_id = int(str(id).strip())
+        for r in RISK_DATA:
+            if r["id"] == rec_id:
+                r.update({
+                    "nome": nome, "nif": nif, "bi": bi, "passaporte": passaporte,
+                    "cartao_residente": cartao_residente, "score_final": score_final,
+                    "justificacao": justificacao, "pep_alert": pep_alert,
+                    "sanctions_alert": sanctions_alert, "historico_pagamentos": historico_pagamentos,
+                    "sinistros_total": sinistros_total, "sinistros_ult_12m": sinistros_ult_12m,
+                    "fraude_suspeita": fraude_suspeita, "comentario_fraude": comentario_fraude,
+                    "esg_score": esg_score, "country_risk": country_risk,
+                    "credit_rating": credit_rating, "kyc_confidence": kyc_confidence,
                 })
-                return {"id": rec["id"], "status": "updated"}
-
-    # CREATE
-    new_id = next_risk_id()
+                return {"status": "updated", "id": rec_id}
+        raise HTTPException(status_code=404, detail="Registo não encontrado")
+    # insert
+    global RISK_SEQ
+    rec_id = RISK_SEQ
+    RISK_SEQ += 1
     rec = {
-        "id": new_id,
-        "nome": nome,
-        "nif": nif,
-        "bi": bi,
-        "passaporte": passaporte,
-        "cartao_residente": cartao_residente,
-        "score_final": score_final,
-        "justificacao": justificacao,
-        "pep_alert": (pep_alert == "1"),
-        "sanctions_alert": (sanctions_alert == "1"),
-        "historico_pagamentos": historico_pagamentos,
-        "sinistros_total": _as_int_or_default(sinistros_total, 0),
-        "sinistros_ult_12m": _as_int_or_default(sinistros_ult_12m, 0),
-        "fraude_suspeita": (fraude_suspeita == "1"),
-        "comentario_fraude": comentario_fraude,
-        "esg_score": esg_score,
-        "country_risk": country_risk,
-        "credit_rating": credit_rating,
-        "kyc_confidence": kyc_confidence,
-        "created_at": now_ts(),
-        "last_update": now_ts(),
+        "id": rec_id, "nome": nome, "nif": nif, "bi": bi, "passaporte": passaporte,
+        "cartao_residente": cartao_residente, "score_final": score_final,
+        "justificacao": justificacao, "pep_alert": pep_alert, "sanctions_alert": sanctions_alert,
+        "historico_pagamentos": historico_pagamentos, "sinistros_total": sinistros_total,
+        "sinistros_ult_12m": sinistros_ult_12m, "fraude_suspeita": fraude_suspeita,
+        "comentario_fraude": comentario_fraude, "esg_score": esg_score, "country_risk": country_risk,
+        "credit_rating": credit_rating, "kyc_confidence": kyc_confidence
     }
-    RISK_DATA_STORE.append(rec)
-
-    return {"id": new_id, "status": "created"}
-
+    RISK_DATA.append(rec)
+    return {"status": "created", "id": rec_id}
 
 @app.get("/api/admin/risk-data/list")
-def admin_list_risk_data(current=Depends(get_current_user)):
-    """Lista todos os registos de risco manual."""
-    require_admin(current)
-    return RISK_DATA_STORE
-
+def admin_risk_list(current_user: User = Depends(get_current_user)):
+    if current_user.role not in ("admin", "analyst"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    return RISK_DATA
 
 @app.post("/api/admin/risk-data/delete-record")
-def admin_delete_risk_record(
+def admin_risk_delete_record(
     id: str = Form(...),
-    current=Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Apaga um registo de risco manual por ID."""
-    require_admin(current)
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Apenas admin")
+    if not id.strip().isdigit():
+        raise HTTPException(status_code=400, detail="ID inválido")
+    rec_id = int(id.strip())
+    for i, r in enumerate(RISK_DATA):
+        if r["id"] == rec_id:
+            RISK_DATA.pop(i)
+            return {"status": "deleted", "id": rec_id}
+    raise HTTPException(status_code=404, detail="Registo não encontrado")
 
-    global RISK_DATA_STORE
-    before = len(RISK_DATA_STORE)
-    RISK_DATA_STORE = [r for r in RISK_DATA_STORE if str(r["id"]) != str(id)]
-    after = len(RISK_DATA_STORE)
-
-    if before == after:
-        raise HTTPException(status_code=404, detail="Registo não encontrado")
-
-    return {"status": "deleted", "id": id}
-
-
-# =========================================================
-# ÁREA ADMIN: FONTES DE INFORMAÇÃO
-# =========================================================
-
+# -------------------------------------------------------------------
+# ADMIN — Fontes de Informação
+# -------------------------------------------------------------------
 @app.post("/api/admin/info-sources/upload")
-def admin_upload_source_file(
+def admin_upload_file(
     file: UploadFile = File(...),
-    current=Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Upload de ficheiro de fonte (PEP, sanções, etc.)."""
-    require_admin(current)
-
-    stored_filename = f"{int(datetime.utcnow().timestamp())}_{file.filename}"
-    dest_path = os.path.join("uploads", stored_filename)
-
-    with open(dest_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    return {"stored_filename": stored_filename}
-
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Apenas admin")
+    safe_name = file.filename.replace("..", ".").replace("/", "_")
+    stored_path = os.path.join(UPLOAD_DIR, safe_name)
+    with open(stored_path, "wb") as f:
+        f.write(file.file.read())
+    return {"status": "ok", "stored_filename": safe_name}
 
 @app.post("/api/admin/info-sources/create")
-def admin_create_source(
-    title: str = Form(""),
+def admin_info_create(
+    title: str = Form(...),
     description: str = Form(""),
     url: str = Form(""),
     directory: str = Form(""),
@@ -627,47 +375,34 @@ def admin_create_source(
     categoria: str = Form(""),
     source_owner: str = Form(""),
     validade: str = Form(""),
-    current=Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Regista metadados da fonte de informação."""
-    require_admin(current)
-
-    if (not title.strip()) or (not description.strip()):
-        raise HTTPException(status_code=422, detail="Título e descrição são obrigatórios")
-
-    record = {
-        "title": title.strip(),
-        "description": description.strip(),
-        "url": url.strip(),
-        "directory": directory.strip(),
-        "filename": filename.strip(),
-        "categoria": categoria.strip(),
-        "source_owner": source_owner.strip(),
-        "validade": validade.strip(),
-        "uploaded_at": now_ts(),
-    }
-    SOURCES_STORE.append(record)
-
-    return {"status": "ok"}
-
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Apenas admin")
+    INFO_SOURCES.append({
+        "title": title, "description": description, "url": url, "directory": directory,
+        "filename": filename, "categoria": categoria, "source_owner": source_owner,
+        "validade": validade
+    })
+    return {"status": "ok", "count": len(INFO_SOURCES)}
 
 @app.get("/api/admin/info-sources/list")
-def admin_list_sources(current=Depends(get_current_user)):
-    """Lista todas as fontes de informação registadas."""
-    require_admin(current)
-    return SOURCES_STORE
-
+def admin_info_list(current_user: User = Depends(get_current_user)):
+    if current_user.role not in ("admin", "analyst"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    return INFO_SOURCES
 
 @app.post("/api/admin/info-sources/delete")
-def admin_delete_source(
-    index: int = Form(...),
-    current=Depends(get_current_user)
+def admin_info_delete(
+    index: str = Form(...),
+    current_user: User = Depends(get_current_user),
 ):
-    """Elimina uma fonte pelo índice."""
-    require_admin(current)
-
-    if index < 0 or index >= len(SOURCES_STORE):
-        raise HTTPException(status_code=404, detail="Fonte não encontrada")
-
-    SOURCES_STORE.pop(index)
-    return {"status": "deleted", "index": index}
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Apenas admin")
+    if not index.strip().isdigit():
+        raise HTTPException(status_code=400, detail="Índice inválido")
+    i = int(index.strip())
+    if i < 0 or i >= len(INFO_SOURCES):
+        raise HTTPException(status_code=404, detail="Não encontrado")
+    INFO_SOURCES.pop(i)
+    return {"status": "deleted", "index": i}
