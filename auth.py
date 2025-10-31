@@ -1,13 +1,20 @@
-import os, time, jwt, hashlib
+import os, time, jwt
 from fastapi import HTTPException, status
+from passlib.context import CryptContext
 
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
 ALGO = "HS256"
 TOKEN_TTL = int(os.getenv("TOKEN_TTL_SECONDS", str(60*60*24)))  # 24h por defeito
+BCRYPT_ROUNDS = int(os.getenv("BCRYPT_ROUNDS", "12"))
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_pw(pw: str) -> str:
-    salt = "cir$2025!"
-    return hashlib.sha256((salt + pw).encode()).hexdigest()
+    # Sem typos: usa 'pw' (não 'p')
+    return pwd_context.hash(pw, rounds=BCRYPT_ROUNDS)
+
+def verify_pw(pw: str, hashed: str) -> bool:
+    return pwd_context.verify(pw, hashed)
 
 def create_token(sub: str, name: str, role: str) -> str:
     now = int(time.time())
