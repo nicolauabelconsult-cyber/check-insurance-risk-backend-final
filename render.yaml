@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: check-insurance-risk-backend-final
+    name: check-insurance-risk-backend
     env: python
     region: frankfurt
     plan: free
@@ -15,3 +15,5 @@ services:
         value: "*"
       - key: TOKEN_TTL_SECONDS
         value: "86400"
+      - key: BCRYPT_ROUNDS
+        value: "12"
