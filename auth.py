@@ -1,17 +1,13 @@
-import os, time, jwt, hashlib, hmac
+import os, time, jwt, hashlib
 from fastapi import HTTPException, status
 
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
 ALGO = "HS256"
-# 24h por defeito (podes mudar em env: TOKEN_TTL_SECONDS)
-TOKEN_TTL = int(os.getenv("TOKEN_TTL_SECONDS", str(60*60*24)))
-
-# usa um sal fixo simples; em produção usa bcrypt/argon2
-SALT = os.getenv("PASSWORD_SALT", "cir$2025!")
+TOKEN_TTL = int(os.getenv("TOKEN_TTL_SECONDS", str(60*60*24)))  # 24h por defeito
 
 def hash_pw(pw: str) -> str:
-    digest = hashlib.sha256((SALT + pw).encode()).hexdigest()
-    return digest
+    salt = "cir$2025!"
+    return hashlib.sha256((salt + pw).encode()).hexdigest()
 
 def create_token(sub: str, name: str, role: str) -> str:
     now = int(time.time())
