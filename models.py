@@ -1,14 +1,16 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text
 from sqlalchemy.sql import func
 from database import Base
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(120), nullable=False)
     email = Column(String(120), unique=True, index=True, nullable=False)
-    password = Column(String(255), nullable=False)
+    password = Column(String(255), nullable=False)  # bcrypt hash
     role = Column(String(32), default="analyst")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class RiskRecord(Base):
     __tablename__ = "risk_records"
     id = Column(Integer, primary_key=True, index=True)
@@ -31,6 +33,7 @@ class RiskRecord(Base):
     credit_rating = Column(String(64))
     kyc_confidence = Column(String(64))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class InfoSource(Base):
     __tablename__ = "info_sources"
     id = Column(Integer, primary_key=True, index=True)
