@@ -5,13 +5,17 @@ from passlib.context import CryptContext
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
 ALGO = "HS256"
 TOKEN_TTL = int(os.getenv("TOKEN_TTL_SECONDS", str(60*60*24)))  # 24h por defeito
-BCRYPT_ROUNDS = int(os.getenv("BCRYPT_ROUNDS", "12"))
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# PBKDF2-SHA256 (sem limite de 72 bytes; puro Python; robusto)
+PWD_ROUNDS = int(os.getenv("PBKDF2_ROUNDS", "29000"))
+pwd_context = CryptContext(
+    schemes=["pbkdf2_sha256"],
+    deprecated="auto",
+    pbkdf2_sha256__rounds=PWD_ROUNDS,
+)
 
 def hash_pw(pw: str) -> str:
-    # Sem typos: usa 'pw' (não 'p')
-    return pwd_context.hash(pw, rounds=BCRYPT_ROUNDS)
+    return pwd_context.hash(pw)
 
 def verify_pw(pw: str, hashed: str) -> bool:
     return pwd_context.verify(pw, hashed)
