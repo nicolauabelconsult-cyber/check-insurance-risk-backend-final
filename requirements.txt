@@ -1,8 +1,0 @@
-fastapi
-uvicorn
-passlib[bcrypt]
-python-jose
-python-multipart
-httpx==0.27.2
-beautifulsoup4==4.12.3
-rapidfuzz==3.9.6
