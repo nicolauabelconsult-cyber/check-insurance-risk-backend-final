@@ -234,3 +234,19 @@ def audit_list(payload: dict = Depends(bearer)):
     if payload.get("role") not in ("admin","auditor"):
         raise HTTPException(status_code=403, detail="Apenas administradores/auditores")
     return list_logs()
+    
+    # main.py
+import os
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def health():
+    return {"ok": True, "service": "CIR Backend", "version": "3.0.0"}
+
+# (opcional) só para correr localmente; em produção o Render usa o Start Command acima
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
