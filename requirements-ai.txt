@@ -1,8 +1,16 @@
-fastapi
-uvicorn
-passlib[bcrypt]
-python-jose
-python-multipart
+fastapi==0.115.0
+uvicorn==0.30.6
+
+# Auth / util
+python-jose[cryptography]==3.3.0
+python-multipart==0.0.9
+passlib[bcrypt]==1.7.4
+
+# DB (se usas Postgres com SQLAlchemy)
+SQLAlchemy==2.0.32
+psycopg2-binary==2.9.9      # (para sync). Se usares async, troca por: asyncpg==0.29.0
+
+# IA / scraping (add-on)
 httpx==0.27.2
 beautifulsoup4==4.12.3
 rapidfuzz==3.9.6
