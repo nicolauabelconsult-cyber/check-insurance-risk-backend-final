@@ -13,12 +13,19 @@ from audit import log, list_logs
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*")
 
-app = FastAPI(title="Check Insurance Risk Backend", version="3.0.0")
-app.add_middleware(SecurityHeadersMiddleware)
+from fastapi.middleware.cors import CORSMiddleware
+
+ALLOWED_ORIGINS = [
+    "https://checkinsurancerisk.com",
+    "https://checkinsurancerisk.netlify.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN] if FRONTEND_ORIGIN != "*" else ["*"],
-    allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,   # adiciona aqui outros domínios se precisares
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 Base.metadata.create_all(bind=engine)
@@ -250,3 +257,6 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
 
+@app.post("/api/auth/login")
+async def auth_login(payload: LoginRequest):
+    return await login(payload)
