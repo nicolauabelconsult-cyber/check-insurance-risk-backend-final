@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 from models import User, RiskRecord, InfoSource
 from auth import create_token, decode_token, hash_pw, verify_pw
-from schemas import LoginReq, LoginResp, RiskCheckReq
+from schemas import LoginReq, LoginResp, LoginResp, RiskCheckReq
 from utils import ensure_dir, render_pdf
 from security import SecurityHeadersMiddleware
 from audit import log, list_logs
