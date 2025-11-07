@@ -1,29 +1,24 @@
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
-from passlib.context import CryptContext
-import os
+from passlib.hash import bcrypt, bcrypt_sha256
 
-SECRET = os.getenv("JWT_SECRET", "change-me-please")
-ALGO = "HS256"
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# usar bcrypt_sha256 por omissão (suporta >72 bytes)
+def hash_pw(password: str) -> str:
+    return bcrypt_sha256.hash(password)
 
-def hash_pw(p: str) -> str:
-    return pwd.hash(p)
-
-def verify_pw(p: str, h: str) -> bool:
-    return pwd.verify(p, h)
-
-def create_token(sub: str, name: str, role: str):
-    payload = {
-        "sub": sub,
-        "name": name,
-        "role": role,
-        "exp": datetime.utcnow() + timedelta(hours=12)
-    }
-    return jwt.encode(payload, SECRET, algorithm=ALGO)
-
-def decode_token(token: str):
+# verificador compatível com hashes antigos (bcrypt) e novos (bcrypt_sha256)
+def verify_pw(password: str, hashed: str) -> bool:
     try:
-        return jwt.decode(token, SECRET, algorithms=[ALGO])
-    except JWTError:
-        raise ValueError("invalid-token")
+        # se for hash do tipo bcrypt_sha256
+        if bcrypt_sha256.identify(hashed):
+            return bcrypt_sha256.verify(password, hashed)
+        # se for hash antigo do tipo bcrypt
+        if bcrypt.identify(hashed):
+            return bcrypt.verify(password, hashed)
+    except Exception:
+        pass
+    # tentativa final (tolerante)
+    try:
+        return bcrypt_sha256.verify(password, hashed) or bcrypt.verify(password, hashed)
+    except Exception:
+        return False
