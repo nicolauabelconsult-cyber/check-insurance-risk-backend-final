@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 from models import User, RiskRecord, InfoSource
 from auth import create_token, decode_token, hash_pw, verify_pw
-from schemas import LoginReq, LoginResp, LoginResp, RiskCheckReq
+from schemas import LoginReq, LoginResp, RiskCheckReq
 from utils import ensure_dir, render_pdf
 from security import SecurityHeadersMiddleware
 from audit import log, list_logs
@@ -33,9 +33,6 @@ app.add_middleware(
 )
 
 # --- ROTAS BÁSICAS / HEALTH ---
-@app.get("/")
-def health():
-    return {"ok": True, "service": "CIR Backend", "version": "3.0.0"}
 
 # --- IMPORTA/DEFINE AQUI as tuas dependências, modelos e handlers ---
 # class LoginReq(...): ...
@@ -265,6 +262,7 @@ def audit_list(payload: dict = Depends(bearer)):
         raise HTTPException(status_code=403, detail="Apenas administradores/auditores")
     return list_logs()
     
- @app.post("/api/auth/login")
-async def auth_login(payload: LoginReq):
-    return await login(payload)
+@app.post("/api/auth/login", response_model=LoginResp)
+def auth_login(payload: LoginReq, db: Session = Depends(get_db), request: Request | None = None):
+    # Reutiliza a mesma lógica do /api/login
+    return login(req=payload, db=db, request=request)
