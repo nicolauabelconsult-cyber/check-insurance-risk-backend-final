@@ -38,12 +38,12 @@ def health():
     return {"ok": True, "service": "CIR Backend", "version": "3.0.0"}
 
 # --- IMPORTA/DEFINE AQUI as tuas dependências, modelos e handlers ---
-# class LoginRequest(...): ...
-# @app.post("/api/login") async def login(payload: LoginRequest): ...
+# class LoginReq(...): ...
+# @app.post("/api/login") async def login(payload: LoginReq): ...
 
 # Compatibilidade com o frontend antigo:
 # @app.post("/api/auth/login")
-# async def auth_login(payload: LoginRequest):
+# async def auth_login(payload: LoginReq):
 #     return await login(payload)
 
 # --- Só para correr localmente. No Render usa o Start Command. ---
@@ -281,5 +281,5 @@ if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
 
 @app.post("/api/auth/login")
-async def auth_login(payload: LoginRequest):
+async def auth_login(payload: LoginReq):
     return await login(payload)
