@@ -2,32 +2,26 @@
 fastapi==0.115.0
 uvicorn==0.30.6
 
+# DB
+SQLAlchemy==2.0.31
+
 # Auth / JWT
 python-jose[cryptography]==3.3.0
 cryptography==42.0.7
 
-# Password hashing (usa passlib + bcrypt)
+# Password hashing
 passlib[bcrypt]==1.7.4
-bcrypt==4.0.1
-
-# Form-data (UploadFile/File/Form)
+bcrypt==4.1.2
 python-multipart==0.0.9
 
-# Evita o erro do pydantic[email] (email-validator ausente)
+# Pydantic extra
 email-validator==2.1.0.post1
 
-# ORM / DB
-SQLAlchemy==2.0.32
-# Se estiveres a usar Postgres no Render, adiciona (caso contrário, se for SQLite, NÃO é preciso):
-# psycopg2-binary==2.9.9
+# PDF
+reportlab==4.2.2
 
-# (Opcional – se usares os parsers/IA/ingest)
-httpx==0.27.2
-beautifulsoup4==4.12.3
-lxml==5.2.1
-rapidfuzz==3.9.6
-unidecode==1.3.8
-
-reportlab==3.6.13
-Pillow==10.4.0
-
+# Scraping / HTTP (necessário!)
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+html5lib==1.1
