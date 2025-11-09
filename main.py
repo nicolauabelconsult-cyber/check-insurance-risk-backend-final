@@ -98,8 +98,10 @@ def auth_login(payload: LoginReq, db: Session = Depends(get_db), request: Reques
 # ---------- Core ----------
 @app.post("/api/risk-check")
 def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session = Depends(get_db)):
+    # Log
     log(payload.get("sub"), "risk-check", {"identifier": req.identifier, "type": req.identifier_type})
 
+    # 1) Tenta registo interno
     rec = db.query(RiskRecord).filter(
         (RiskRecord.nif == req.identifier) |
         (RiskRecord.bi == req.identifier) |
@@ -107,53 +109,92 @@ def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session =
         (RiskRecord.cartao_residente == req.identifier)
     ).first()
 
+    # Fallbacks base
+    base_score = 75
+    pep = sanc = fraude = False
+    justificacao = "Histórico limpo; critérios de KYC cumpridos."
+
+    nome = nif = bi = passaporte = cartao_residente = None
+    historico_pagamentos = sinistros_total = sinistros_ult_12m = comentario_fraude = None
+    esg_score = country_risk = credit_rating = kyc_confidence = None
+
     if rec:
-        base_score = rec.score_final or 75
+        base_score = rec.score_final or base_score
         pep = bool(rec.pep_alert)
         sanc = bool(rec.sanctions_alert)
         fraude = bool(rec.fraude_suspeita)
-    else:
-        base_score = 75
-        pep = sanc = fraude = False
+        justificacao = rec.justificacao or justificacao
 
-    decisao = (
-        "Aceitar com condições"
-        if base_score >= 75 and not (pep or sanc or fraude)
-        else "Escalar para revisão manual"
+        nome = rec.nome
+        nif = rec.nif
+        bi = rec.bi
+        passaporte = rec.passaporte
+        cartao_residente = rec.cartao_residente
+        historico_pagamentos = rec.historico_pagamentos
+        sinistros_total = rec.sinistros_total
+        sinistros_ult_12m = rec.sinistros_ult_12m
+        comentario_fraude = rec.comentario_fraude
+        esg_score = rec.esg_score
+        country_risk = rec.country_risk
+        credit_rating = rec.credit_rating
+        kyc_confidence = rec.kyc_confidence
+
+    # 2) Enriquecer com fontes (PEP/sanções, etc.)
+    facts = build_facts_from_sources(
+        identifier_value=req.identifier,
+        identifier_type=req.identifier_type,
+        db=db,
     )
-    justificacao = (
-        rec.justificacao
-        if rec and rec.justificacao
-        else ("Histórico limpo; critérios de KYC cumpridos." if decisao.startswith("Aceitar")
-              else "Inconsistências detectadas; validar documentação e origem de fundos.")
-    )
+
+    # Aplicar sinais encontrados
+    if facts.get("pep", {}).get("value"):
+        pep = True
+        match_name = facts["pep"].get("matched_name")
+        if match_name:
+            justificacao = f"{justificacao} | IA: possível PEP ({match_name})."
+
+    if facts.get("sanctions", {}).get("value"):
+        sanc = True
+        match_name = facts["sanctions"].get("matched_name")
+        if match_name:
+            justificacao = f"{justificacao} | IA: possível sanção ({match_name})."
+
+    # 3) Decisão técnica
+    decisao = "Aceitar com condições" if (base_score >= 75 and not (pep or sanc or fraude)) else "Escalar para revisão manual"
 
     consulta_id = f"CIR-{int(time.time())}"
+
     return {
         "consulta_id": consulta_id,
         "timestamp": dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
         "identifier": req.identifier,
         "identifier_type": req.identifier_type,
+
         "score_final": base_score,
         "decisao": decisao,
         "justificacao": justificacao,
+
         "pep_alert": pep,
         "sanctions_alert": sanc,
         "fraude_suspeita": fraude,
+
         "benchmark_internacional": "OECD KYC Bench v1.2 / FATF rec. 10",
-        "nome": rec.nome if rec else None,
-        "nif": rec.nif if rec else None,
-        "bi": rec.bi if rec else None,
-        "passaporte": rec.passaporte if rec else None,
-        "cartao_residente": rec.cartao_residente if rec else None,
-        "historico_pagamentos": rec.historico_pagamentos if rec else None,
-        "sinistros_total": rec.sinistros_total if rec else None,
-        "sinistros_ult_12m": rec.sinistros_ult_12m if rec else None,
-        "comentario_fraude": rec.comentario_fraude if rec else None,
-        "esg_score": rec.esg_score if rec else None,
-        "country_risk": rec.country_risk if rec else None,
-        "credit_rating": rec.credit_rating if rec else None,
-        "kyc_confidence": rec.kyc_confidence if rec else None,
+
+        # Campos do registo (quando existir)
+        "nome": nome, "nif": nif, "bi": bi, "passaporte": passaporte, "cartao_residente": cartao_residente,
+        "historico_pagamentos": historico_pagamentos,
+        "sinistros_total": sinistros_total, "sinistros_ult_12m": sinistros_ult_12m,
+        "comentario_fraude": comentario_fraude,
+        "esg_score": esg_score, "country_risk": country_risk,
+        "credit_rating": credit_rating, "kyc_confidence": kyc_confidence,
+
+        # Estado das fontes para a UI
+        "ai_status": facts.get("ai_status"),   # ok | no_match | no_data
+        "ai_reason": facts.get("ai_reason"),   # explicação humana
+        "ai_facts": {
+            "pep": facts.get("pep"),
+            "sanctions": facts.get("sanctions"),
+        },
     }
 
 # ---------- Report (PDF) ----------
@@ -422,3 +463,25 @@ def audit_list(payload: dict = Depends(bearer)):
     if payload.get("role") not in ("admin", "auditor"):
         raise HTTPException(status_code=403, detail="Apenas administradores/auditores")
     return list_logs()
+
+@app.get("/api/ai/test-source")
+def ai_test_source(id: int, payload: dict = Depends(bearer), db: Session = Depends(get_db)):
+    if payload.get("role") not in ("admin", "auditor"):
+        raise HTTPException(status_code=403, detail="Apenas administradores/auditores")
+    src = db.query(InfoSource).filter(InfoSource.id == id).first()
+    if not src:
+        raise HTTPException(status_code=404, detail="Fonte inexistente")
+
+    # usa 'categoria' como 'kind'
+    kind = (src.categoria or "").strip().lower()
+    if not kind:
+        return {"count": 0, "sample": [], "message": "A categoria (kind) da fonte não foi definida."}
+
+    from extractors import run_extractor
+    url_or_path = src.url or (f"{src.directory.rstrip('/')}/{src.filename.lstrip('/')}" if src.directory and src.filename else None)
+    if not url_or_path:
+        return {"count": 0, "sample": [], "message": "Fonte sem URL nem ficheiro associado."}
+
+    facts = run_extractor(kind, url_or_path, hint=src.validade)
+    return {"count": len(facts), "sample": facts[:20]}
+
