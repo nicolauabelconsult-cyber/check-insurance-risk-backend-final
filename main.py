@@ -2,7 +2,7 @@ import os, datetime as dt, json, time
 from typing import Optional
 
 from watchlist import is_pep_name
-from ai_pipeline import build_facts_from_sources
+from ai_pipeline import build_facts_from_sources  # << único import deste
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -106,7 +106,6 @@ def auth_login(payload: LoginReq, db: Session = Depends(get_db), request: Reques
     # Reutiliza a mesma lógica do /api/login
     return login(req=payload, db=db, request=request)
 
-# ---------- Core ----------
 @app.post("/api/risk-check")
 def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session = Depends(get_db)):
     # Log
@@ -134,14 +133,6 @@ def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session =
         pep = bool(rec.pep_alert)
         sanc = bool(rec.sanctions_alert)
         fraude = bool(rec.fraude_suspeita)
-        # Se a pesquisa for por Nome, consulta a watchlist PEP baseada nas fontes
-if (req.identifier_type or "").strip().lower() in {"nome", "name"}:
-    try:
-        if is_pep_name(req.identifier):
-            pep = True
-    except Exception:
-        pass
-
         justificacao = rec.justificacao or justificacao
 
         nome = rec.nome
@@ -158,12 +149,22 @@ if (req.identifier_type or "").strip().lower() in {"nome", "name"}:
         credit_rating = rec.credit_rating
         kyc_confidence = rec.kyc_confidence
 
-    # 2) Enriquecer com fontes (PEP/sanções, etc.)
+    # 2) Sinal PEP por nome (watchlist em memória)
+    if (req.identifier_type or "").strip().lower() in {"nome", "name"}:
+        try:
+            if is_pep_name(req.identifier):
+                pep = True
+                justificacao = f"{justificacao} | Nome coincide com PEP (watchlist)."
+        except Exception:
+            # não falha a request por causa da verificação de PEP
+            pass
+
+    # 3) Enriquecer com fontes (PEP/sanções, etc.)
     facts = build_facts_from_sources(
         identifier_value=req.identifier,
         identifier_type=req.identifier_type,
         db=db,
-    )
+    ) or {}
 
     # Aplicar sinais encontrados
     if facts.get("pep", {}).get("value"):
@@ -178,9 +179,8 @@ if (req.identifier_type or "").strip().lower() in {"nome", "name"}:
         if match_name:
             justificacao = f"{justificacao} | IA: possível sanção ({match_name})."
 
-    # 3) Decisão técnica
+    # 4) Decisão técnica
     decisao = "Aceitar com condições" if (base_score >= 75 and not (pep or sanc or fraude)) else "Escalar para revisão manual"
-
     consulta_id = f"CIR-{int(time.time())}"
 
     return {
@@ -441,6 +441,13 @@ def info_source_create(
     db.commit()
     db.refresh(item)
     log(payload.get("sub"), "source-create", {"id": item.id})
+
+    # refresca a watchlist/IA a partir das fontes atuais
+    try:
+        build_facts_from_sources(db)
+    except Exception:
+        pass
+
     return {"status": "ok", "id": item.id}
 
 @app.get("/api/admin/info-sources/list")
@@ -465,29 +472,28 @@ def info_source_list(payload: dict = Depends(bearer), db: Session = Depends(get_
     ]
 
 @app.post("/api/admin/info-sources/delete")
-def info_source_delete(id: int = Form(...), payload: dict = Depends(bearer), db: Session = Depends(get_db)):
+def info_source_delete(
+    id: int = Form(...),
+    payload: dict = Depends(bearer),
+    db: Session = Depends(get_db),
+):
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Apenas administradores")
+
     item = db.query(InfoSource).filter(InfoSource.id == id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Fonte inexistente")
+
     db.delete(item)
     db.commit()
     log(payload.get("sub"), "source-delete", {"id": id})
-    log(payload.get("sub"), "source-create", {"id": item.id})
-try:
-    build_facts_from_sources(db)   # <-- refresca já
-except Exception:
-    pass
-return {"status": "ok", "id": item.id}
-db.delete(item)
-db.commit()
-log(payload.get("sub"), "source-delete", {"id": id})
-try:
-    build_facts_from_sources(db)   # <-- refresca já
-except Exception:
-    pass
-return {"status": "deleted"}
+
+    # refresca a watchlist/IA a partir das fontes atuais
+    try:
+        build_facts_from_sources(db)
+    except Exception:
+        pass
+
     return {"status": "deleted"}
 
 # ---------- Auditoria ----------
