@@ -1,5 +1,6 @@
-# main.py  (apenas as partes alteradas / adicionadas)
-import os, datetime as dt, time
+import os
+import time
+import datetime as dt
 from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, Header, Request
@@ -15,9 +16,12 @@ from utils import ensure_dir, render_pdf
 from security import SecurityHeadersMiddleware
 from audit import log, list_logs
 
-# 👉 importa do pipeline
+# IA / Extractors
 from ai_pipeline import build_facts_from_sources, rebuild_watchlist, is_pep_name
 
+# -----------------------------------------------------------------------------
+# App & CORS
+# -----------------------------------------------------------------------------
 app = FastAPI(title="Check Insurance Risk Backend", version="3.0.0")
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -35,16 +39,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------- DB bootstrap ----------
+# -----------------------------------------------------------------------------
+# DB bootstrap
+# -----------------------------------------------------------------------------
 Base.metadata.create_all(bind=engine)
 
-# Rebuild watchlist on startup (não falha o arranque se der erro)
 @app.on_event("startup")
 def _startup_build_watchlist():
+    """Reconstrói a watchlist a partir das fontes na base (não falha o arranque)."""
     try:
         with SessionLocal() as s:
             rebuild_watchlist(s)
     except Exception:
+        # Se falhar, continua — o scraping é on-demand no risk-check
         pass
 
 def get_db():
@@ -61,8 +68,12 @@ with SessionLocal() as s:
             User(name="Administrador", email="admin@checkrisk.com",  password=hash_pw("admin123"), role="admin"),
             User(name="Analyst",       email="analyst@checkrisk.com",password=hash_pw("analyst123"), role="analyst"),
             User(name="Auditor",       email="auditor@checkrisk.com",password=hash_pw("auditor123"), role="auditor"),
-        ]); s.commit()
+        ])
+        s.commit()
 
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 def bearer(authorization: Optional[str] = Header(default=None)) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Cabeçalho Authorization inválido")
@@ -74,11 +85,26 @@ def bearer(authorization: Optional[str] = Header(default=None)) -> dict:
 
 @app.exception_handler(Exception)
 async def default_handler(request: Request, exc: Exception):
-    return JSONResponse(status_code=500, content={"detail":"Erro interno"})
+    return JSONResponse(status_code=500, content={"detail": "Erro interno"})
 
-# --- Health/meta omitido por brevidade ---
+# -----------------------------------------------------------------------------
+# Health & meta
+# -----------------------------------------------------------------------------
+@app.get("/")
+def root():
+    return {"ok": True, "service": "CIR Backend", "version": app.version}
 
-# ---------- Auth ----------
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/version")
+def version():
+    return {"service": "CIR Backend", "version": app.version}
+
+# -----------------------------------------------------------------------------
+# Auth
+# -----------------------------------------------------------------------------
 @app.post("/api/login", response_model=LoginResp)
 def login(req: LoginReq, db: Session = Depends(get_db), request: Request = None) -> LoginResp:
     user = db.query(User).filter(User.email == req.email).first()
@@ -93,11 +119,14 @@ def login(req: LoginReq, db: Session = Depends(get_db), request: Request = None)
 def auth_login(payload: LoginReq, db: Session = Depends(get_db), request: Request = None) -> LoginResp:
     return login(req=payload, db=db, request=request)
 
-# ---------- Core ----------
+# -----------------------------------------------------------------------------
+# Core: Risk Check
+# -----------------------------------------------------------------------------
 @app.post("/api/risk-check")
 def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session = Depends(get_db)):
     log(payload.get("sub"), "risk-check", {"identifier": req.identifier, "type": req.identifier_type})
 
+    # 1) dados internos (se existirem)
     rec = db.query(RiskRecord).filter(
         (RiskRecord.nif == req.identifier) |
         (RiskRecord.bi == req.identifier) |
@@ -119,27 +148,54 @@ def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session =
         sanc = bool(rec.sanctions_alert)
         fraude = bool(rec.fraude_suspeita)
         justificacao = rec.justificacao or justificacao
-        nome = rec.nome; nif = rec.nif; bi = rec.bi; passaporte = rec.passaporte; cartao_residente = rec.cartao_residente
-        historico_pagamentos = rec.historico_pagamentos; sinistros_total = rec.sinistros_total
-        sinistros_ult_12m = rec.sinistros_ult_12m; comentario_fraude = rec.comentario_fraude
-        esg_score = rec.esg_score; country_risk = rec.country_risk; credit_rating = rec.credit_rating
+        nome = rec.nome
+        nif = rec.nif
+        bi = rec.bi
+        passaporte = rec.passaporte
+        cartao_residente = rec.cartao_residente
+        historico_pagamentos = rec.historico_pagamentos
+        sinistros_total = rec.sinistros_total
+        sinistros_ult_12m = rec.sinistros_ult_12m
+        comentario_fraude = rec.comentario_fraude
+        esg_score = rec.esg_score
+        country_risk = rec.country_risk
+        credit_rating = rec.credit_rating
         kyc_confidence = rec.kyc_confidence
 
-    # ⚙️ IA / Fontes
+    # 2) IA / Fontes (on-demand, a partir das InfoSource)
     facts = build_facts_from_sources(
         identifier_value=req.identifier,
         identifier_type=req.identifier_type,
         db=db,
     )
 
+    # 2.1) heurística por nome (watchlist já montada)
+    try:
+        if (req.identifier_type or "").strip().lower() in {"nome", "name"} and is_pep_name(req.identifier):
+            pep = True
+            justificacao = f"{justificacao} | Watchlist indica possível PEP por nome."
+    except Exception:
+        pass
+
+    # 2.2) Sinais do scraping
     if facts.get("pep", {}).get("value"):
         pep = True
         m = facts["pep"]
-        justificacao = f"{justificacao} | IA: possível PEP ({m.get('matched_name')} – {m.get('cargo')}, fonte {m.get('source')}, score {m.get('score')})."
+        try:
+            justificacao = (
+                f"{justificacao} | IA: possível PEP "
+                f"({m.get('matched_name') or '—'}"
+                f"{' – ' + m.get('cargo') if m.get('cargo') else ''}, "
+                f"fonte {m.get('source') or '—'}, score {m.get('score') if m.get('score') is not None else '—'})."
+            )
+        except Exception:
+            pass
 
     if facts.get("sanctions", {}).get("value"):
-        sanc = True  # (placeholder)
+        sanc = True
+        # (quando tiveres detalhes, podes enriquecer a justificativa aqui)
 
+    # 3) Decisão técnica
     decisao = "Aceitar com condições" if (base_score >= 75 and not (pep or sanc or fraude)) else "Escalar para revisão manual"
     consulta_id = f"CIR-{int(time.time())}"
 
@@ -166,29 +222,206 @@ def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session =
         "ai_facts": {"pep": facts.get("pep"), "sanctions": facts.get("sanctions")},
     }
 
-# ---------- Admin: Info Sources ----------
+# -----------------------------------------------------------------------------
+# Report (PDF)
+# -----------------------------------------------------------------------------
+@app.get("/api/report/{consulta_id}", response_class=StreamingResponse)
+def get_report(
+    consulta_id: str,
+    token: Optional[str] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    if token:
+        decode_token(token)
+    elif authorization:
+        bearer(authorization)
+    else:
+        raise HTTPException(status_code=401, detail="Token ausente")
 
+    meta = {
+        "consulta_id": consulta_id,
+        "timestamp": dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "identifier": "—",
+        "identifier_type": "—",
+        "score_final": 80,
+        "decisao": "Aceitar com condições",
+        "justificacao": "Parâmetros técnicos dentro do apetite de risco. Monitorizar 6-12 meses.",
+        "pep_alert": False,
+        "sanctions_alert": False,
+        "benchmark_internacional": "OECD KYC Bench v1.2 / FATF rec. 10",
+    }
+
+    ensure_dir("reports")
+    pdf_path = f"reports/{consulta_id}.pdf"
+    render_pdf(pdf_path, meta)
+
+    def it():
+        with open(pdf_path, "rb") as f:
+            while True:
+                ch = f.read(8192)
+                if not ch:
+                    break
+                yield ch
+
+    return StreamingResponse(
+        it(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="relatorio_{consulta_id}.pdf"'},
+    )
+
+# -----------------------------------------------------------------------------
+# Admin: Users
+# -----------------------------------------------------------------------------
+@app.post("/api/admin/user-add")
+def admin_user_add(
+    new_name: str = Form(...),
+    new_email: str = Form(...),
+    new_password: str = Form(...),
+    new_role: str = Form("analyst"),
+    payload: dict = Depends(bearer),
+    db: Session = Depends(get_db),
+):
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Apenas administradores")
+    if db.query(User).filter(User.email == new_email).first():
+        raise HTTPException(status_code=400, detail="Email já existe")
+
+    u = User(name=new_name, email=new_email, password=hash_pw(new_password), role=new_role)
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    log(payload.get("sub"), "user-add", {"user": u.email})
+    return {"status": "ok", "user": {"id": u.id, "email": u.email, "role": u.role}}
+
+# -----------------------------------------------------------------------------
+# Admin: Risk Data
+# -----------------------------------------------------------------------------
+@app.post("/api/admin/risk-data/add-record")
+def admin_risk_add_record(
+    id: str = Form(None),
+    nome: str = Form(None),
+    nif: str = Form(None),
+    bi: str = Form(None),
+    passaporte: str = Form(None),
+    cartao_residente: str = Form(None),
+    score_final: int = Form(0),
+    justificacao: str = Form(None),
+    pep_alert: str = Form("0"),
+    sanctions_alert: str = Form("0"),
+    historico_pagamentos: str = Form(None),
+    sinistros_total: int = Form(0),
+    sinistros_ult_12m: int = Form(0),
+    fraude_suspeita: str = Form("0"),
+    comentario_fraude: str = Form(None),
+    esg_score: int = Form(0),
+    country_risk: str = Form(None),
+    credit_rating: str = Form(None),
+    kyc_confidence: str = Form(None),
+    payload: dict = Depends(bearer),
+    db: Session = Depends(get_db),
+):
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Apenas administradores")
+
+    pep_bool = (str(pep_alert).lower() in ("1", "true", "yes", "sim"))
+    sanc_bool = (str(sanctions_alert).lower() in ("1", "true", "yes", "sim"))
+    fraude_bool = (str(fraude_suspeita).lower() in ("1", "true", "yes", "sim"))
+
+    if id:
+        rec = db.query(RiskRecord).filter(RiskRecord.id == int(id)).first()
+        if not rec:
+            raise HTTPException(status_code=404, detail="Registo inexistente")
+    else:
+        rec = RiskRecord()
+
+    for k, v in dict(
+        nome=nome,
+        nif=nif,
+        bi=bi,
+        passaporte=passaporte,
+        cartao_residente=cartao_residente,
+        score_final=score_final,
+        justificacao=justificacao,
+        pep_alert=pep_bool,
+        sanctions_alert=sanc_bool,
+        historico_pagamentos=historico_pagamentos,
+        sinistros_total=sinistros_total,
+        sinistros_ult_12m=sinistros_ult_12m,
+        fraude_suspeita=fraude_bool,
+        comentario_fraude=comentario_fraude,
+        esg_score=esg_score,
+        country_risk=country_risk,
+        credit_rating=credit_rating,
+        kyc_confidence=kyc_confidence,
+    ).items():
+        setattr(rec, k, v)
+
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    log(payload.get("sub"), "risk-save", {"id": rec.id})
+    return {"status": "saved", "id": rec.id}
+
+@app.get("/api/admin/risk-data/list")
+def admin_risk_list(payload: dict = Depends(bearer), db: Session = Depends(get_db)):
+    if payload.get("role") not in ("admin", "auditor"):
+        raise HTTPException(status_code=403, detail="Apenas administradores/auditores")
+    rows = db.query(RiskRecord).order_by(RiskRecord.id.desc()).all()
+
+    def ser(r: RiskRecord):
+        return {
+            "id": r.id,
+            "nome": r.nome,
+            "nif": r.nif,
+            "bi": r.bi,
+            "passaporte": r.passaporte,
+            "cartao_residente": r.cartao_residente,
+            "score_final": r.score_final,
+            "justificacao": r.justificacao,
+            "pep_alert": r.pep_alert,
+            "sanctions_alert": r.sanctions_alert,
+            "historico_pagamentos": r.historico_pagamentos,
+            "sinistros_total": r.sinistros_total,
+            "sinistros_ult_12m": r.sinistros_ult_12m,
+            "fraude_suspeita": r.fraude_suspeita,
+            "comentario_fraude": r.comentario_fraude,
+            "esg_score": r.esg_score,
+            "country_risk": r.country_risk,
+            "credit_rating": r.credit_rating,
+            "kyc_confidence": r.kyc_confidence,
+        }
+
+    return [ser(r) for r in rows]
+
+@app.post("/api/admin/risk-data/delete-record")
+def admin_risk_delete(id: int = Form(...), payload: dict = Depends(bearer), db: Session = Depends(get_db)):
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Apenas administradores")
+    rec = db.query(RiskRecord).filter(RiskRecord.id == id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Registo inexistente")
+    db.delete(rec)
+    db.commit()
+    log(payload.get("sub"), "risk-delete", {"id": id})
+    return {"status": "deleted"}
+
+# -----------------------------------------------------------------------------
+# Admin: Info Sources
+# -----------------------------------------------------------------------------
 @app.post("/api/admin/info-sources/upload")
 def info_source_upload(file: UploadFile = File(...), payload: dict = Depends(bearer)):
-    """
-    Faz upload de um ficheiro para ./uploads, evitando sobrescrita.
-    Devolve o nome final guardado para poderes usar em 'filename' no 'create'.
-    """
+    """Upload para ./uploads, evitando sobrescrita."""
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Apenas administradores")
 
     ensure_dir("uploads")
 
-    # nome base + extensão (garante extensão mínima)
     fname = file.filename or "fonte"
     base, ext = os.path.splitext(fname)
     if not ext:
         ext = ".bin"
-
-    # caminho inicial
     path = os.path.join("uploads", base + ext)
 
-    # evita colisões: base_1.ext, base_2.ext, ...
     i = 1
     while os.path.exists(path):
         fname = f"{base}_{i}{ext}"
@@ -199,7 +432,6 @@ def info_source_upload(file: UploadFile = File(...), payload: dict = Depends(bea
         f.write(file.file.read())
 
     return {"stored_filename": fname}
-    
 
 @app.post("/api/admin/info-sources/create")
 def info_source_create(
@@ -214,12 +446,7 @@ def info_source_create(
     payload: dict = Depends(bearer),
     db: Session = Depends(get_db),
 ):
-    """
-    Regista uma fonte. Usa:
-      - url (para fontes online), OU
-      - directory + filename (para ficheiros carregados em /uploads)
-    'categoria' deve ter o 'kind' do extractor (ex.: 'gov_ao_ministros').
-    """
+    """Regista uma fonte (url OU directory+filename)."""
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Apenas administradores")
 
@@ -239,9 +466,8 @@ def info_source_create(
 
     log(payload.get("sub"), "source-create", {"id": item.id})
 
-    # opcional: refrescar a watchlist após criar
+    # Opcional: rebuild imediato (não crítico)
     try:
-        from ai_pipeline import rebuild_watchlist
         rebuild_watchlist(db)
     except Exception:
         pass
@@ -269,7 +495,6 @@ def info_source_list(payload: dict = Depends(bearer), db: Session = Depends(get_
         for r in rows
     ]
 
-
 @app.post("/api/admin/info-sources/delete")
 def info_source_delete(id: int = Form(...), payload: dict = Depends(bearer), db: Session = Depends(get_db)):
     if payload.get("role") != "admin":
@@ -277,20 +502,28 @@ def info_source_delete(id: int = Form(...), payload: dict = Depends(bearer), db:
     item = db.query(InfoSource).filter(InfoSource.id == id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Fonte inexistente")
-
     db.delete(item)
     db.commit()
     log(payload.get("sub"), "source-delete", {"id": id})
-
-    # não é obrigatório “refrescar” aqui (o scraping é on-demand), mas não faz mal:
+    # Rebuild opcional (seguro)
     try:
-        build_facts_from_sources(db)  # noop se não houver identifier
+        rebuild_watchlist(db)
     except Exception:
         pass
-
     return {"status": "deleted"}
 
-# ---------- Util: testar uma fonte isolada ----------
+# -----------------------------------------------------------------------------
+# Auditoria
+# -----------------------------------------------------------------------------
+@app.get("/api/admin/audit/list")
+def audit_list(payload: dict = Depends(bearer)):
+    if payload.get("role") not in ("admin", "auditor"):
+        raise HTTPException(status_code=403, detail="Apenas administradores/auditores")
+    return list_logs()
+
+# -----------------------------------------------------------------------------
+# Util: testar uma fonte isolada
+# -----------------------------------------------------------------------------
 @app.get("/api/ai/test-source")
 def ai_test_source(id: int, payload: dict = Depends(bearer), db: Session = Depends(get_db)):
     if payload.get("role") not in ("admin","auditor"):
@@ -298,10 +531,15 @@ def ai_test_source(id: int, payload: dict = Depends(bearer), db: Session = Depen
     src = db.query(InfoSource).filter(InfoSource.id == id).first()
     if not src:
         raise HTTPException(status_code=404, detail="Fonte inexistente")
+
     from extractors import run_extractor
     kind = (src.categoria or "").strip().lower()
-    url_or_path = src.url or (f"{(src.directory or '').rstrip('/')}/{(src.filename or '').lstrip('/')}" if (src.directory and src.filename) else None)
+    url_or_path = src.url or (
+        f"{(src.directory or '').rstrip('/')}/{(src.filename or '').lstrip('/')}"
+        if (src.directory and src.filename) else None
+    )
     if not kind or not url_or_path:
         return {"count": 0, "sample": [], "message": "Fonte sem categoria (kind) ou URL/ficheiro."}
+
     facts = run_extractor(kind, url_or_path, hint=src.validade)
     return {"count": len(facts), "sample": facts[:20]}
