@@ -167,6 +167,40 @@ def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session =
     }
 
 # ---------- Admin: Info Sources ----------
+
+@app.post("/api/admin/info-sources/upload")
+def info_source_upload(file: UploadFile = File(...), payload: dict = Depends(bearer)):
+    """
+    Faz upload de um ficheiro para ./uploads, evitando sobrescrita.
+    Devolve o nome final guardado para poderes usar em 'filename' no 'create'.
+    """
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Apenas administradores")
+
+    ensure_dir("uploads")
+
+    # nome base + extensão (garante extensão mínima)
+    fname = file.filename or "fonte"
+    base, ext = os.path.splitext(fname)
+    if not ext:
+        ext = ".bin"
+
+    # caminho inicial
+    path = os.path.join("uploads", base + ext)
+
+    # evita colisões: base_1.ext, base_2.ext, ...
+    i = 1
+    while os.path.exists(path):
+        fname = f"{base}_{i}{ext}"
+        path = os.path.join("uploads", fname)
+        i += 1
+
+    with open(path, "wb") as f:
+        f.write(file.file.read())
+
+    return {"stored_filename": fname}
+    
+
 @app.post("/api/admin/info-sources/create")
 def info_source_create(
     title: str = Form(...),
@@ -180,41 +214,85 @@ def info_source_create(
     payload: dict = Depends(bearer),
     db: Session = Depends(get_db),
 ):
+    """
+    Regista uma fonte. Usa:
+      - url (para fontes online), OU
+      - directory + filename (para ficheiros carregados em /uploads)
+    'categoria' deve ter o 'kind' do extractor (ex.: 'gov_ao_ministros').
+    """
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Apenas administradores")
 
     item = InfoSource(
-        title=title, description=description, url=url, directory=directory,
-        filename=filename, categoria=categoria, source_owner=source_owner, validade=validade
+        title=title,
+        description=description,
+        url=url,
+        directory=directory,
+        filename=filename,
+        categoria=categoria,
+        source_owner=source_owner,
+        validade=validade,
     )
-    db.add(item); db.commit(); db.refresh(item)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+
     log(payload.get("sub"), "source-create", {"id": item.id})
 
-    # 👉 rebuild automático
+    # opcional: refrescar a watchlist após criar
     try:
+        from ai_pipeline import rebuild_watchlist
         rebuild_watchlist(db)
     except Exception:
         pass
 
-    return {"status":"ok","id": item.id}
+    return {"status": "ok", "id": item.id}
+
+
+@app.get("/api/admin/info-sources/list")
+def info_source_list(payload: dict = Depends(bearer), db: Session = Depends(get_db)):
+    if payload.get("role") not in ("admin", "auditor"):
+        raise HTTPException(status_code=403, detail="Apenas administradores/auditores")
+    rows = db.query(InfoSource).order_by(InfoSource.id.desc()).all()
+    return [
+        {
+            "id": r.id,
+            "title": r.title,
+            "description": r.description,
+            "url": r.url,
+            "directory": r.directory,
+            "filename": r.filename,
+            "categoria": r.categoria,
+            "source_owner": r.source_owner,
+            "validade": r.validade,
+            "uploaded_at": r.uploaded_at.isoformat() if r.uploaded_at else None,
+        }
+        for r in rows
+    ]
+
 
 @app.post("/api/admin/info-sources/delete")
 def info_source_delete(id: int = Form(...), payload: dict = Depends(bearer), db: Session = Depends(get_db)):
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Apenas administradores")
+
     item = db.query(InfoSource).filter(InfoSource.id == id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Fonte inexistente")
-    db.delete(item); db.commit()
+
+    db.delete(item)
+    db.commit()
+
     log(payload.get("sub"), "source-delete", {"id": id})
 
-    # 👉 rebuild automático
+    # opcional: refrescar a watchlist após apagar
     try:
+        from ai_pipeline import rebuild_watchlist
         rebuild_watchlist(db)
     except Exception:
         pass
 
-    return {"status":"deleted"}
+    return {"status": "deleted"}
 
 # ---------- Util: testar uma fonte isolada ----------
 @app.get("/api/ai/test-source")
