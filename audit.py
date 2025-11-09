@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import List, Dict
+from jose import JWTError, jwt
 
 _logs: List[Dict] = []
 
