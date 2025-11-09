@@ -472,6 +472,14 @@ try:
 except Exception:
     pass
 return {"status": "ok", "id": item.id}
+db.delete(item)
+db.commit()
+log(payload.get("sub"), "source-delete", {"id": id})
+try:
+    build_facts_from_sources(db)   # <-- refresca já
+except Exception:
+    pass
+return {"status": "deleted"}
     return {"status": "deleted"}
 
 # ---------- Auditoria ----------
