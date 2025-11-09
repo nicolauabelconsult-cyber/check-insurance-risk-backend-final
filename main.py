@@ -126,6 +126,14 @@ def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session =
         pep = bool(rec.pep_alert)
         sanc = bool(rec.sanctions_alert)
         fraude = bool(rec.fraude_suspeita)
+        # Se a pesquisa for por Nome, consulta a watchlist PEP baseada nas fontes
+if (req.identifier_type or "").strip().lower() in {"nome", "name"}:
+    try:
+        if is_pep_name(req.identifier):
+            pep = True
+    except Exception:
+        pass
+
         justificacao = rec.justificacao or justificacao
 
         nome = rec.nome
