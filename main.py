@@ -248,7 +248,6 @@ def info_source_create(
 
     return {"status": "ok", "id": item.id}
 
-
 @app.get("/api/admin/info-sources/list")
 def info_source_list(payload: dict = Depends(bearer), db: Session = Depends(get_db)):
     if payload.get("role") not in ("admin", "auditor"):
@@ -275,20 +274,17 @@ def info_source_list(payload: dict = Depends(bearer), db: Session = Depends(get_
 def info_source_delete(id: int = Form(...), payload: dict = Depends(bearer), db: Session = Depends(get_db)):
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Apenas administradores")
-
     item = db.query(InfoSource).filter(InfoSource.id == id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Fonte inexistente")
 
     db.delete(item)
     db.commit()
-
     log(payload.get("sub"), "source-delete", {"id": id})
 
-    # opcional: refrescar a watchlist após apagar
+    # não é obrigatório “refrescar” aqui (o scraping é on-demand), mas não faz mal:
     try:
-        from ai_pipeline import rebuild_watchlist
-        rebuild_watchlist(db)
+        build_facts_from_sources(db)  # noop se não houver identifier
     except Exception:
         pass
 
