@@ -442,11 +442,12 @@ def info_source_create(
     db.refresh(item)
     log(payload.get("sub"), "source-create", {"id": item.id})
 
-    # refresca a watchlist/IA a partir das fontes atuais
+    # 🔁 Recarrega as fontes e atualiza watchlist PEP
     try:
-        build_facts_from_sources(db)
-    except Exception:
-        pass
+        from ai_pipeline import build_facts_from_sources
+        build_facts_from_sources(db=db, identifier_value="", identifier_type="")
+    except Exception as e:
+        print("⚠️ Erro ao atualizar fontes:", e)
 
     return {"status": "ok", "id": item.id}
 
