@@ -1,4 +1,3 @@
-# Web
 fastapi==0.115.0
 uvicorn==0.30.6
 
@@ -11,21 +10,18 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.9
 
-# Pydantic extra (evita o aviso do email-validator)
-email-validator==2.1.0.post1
+# Pydantic v1 (compatível com Py 3.11)
 pydantic==1.10.15
+email-validator==2.1.0.post1
 
-# DB
-SQLAlchemy==2.0.36
-
-# PDF
-reportlab==4.2.5
-Jinja2==3.1.4
-
-# HTTP + scraping (100% Python, sem C)
+# HTTP + scraping leve (sem lxml)
+requests==2.31.0
 httpx==0.27.2
 beautifulsoup4==4.12.3
 html5lib==1.1
+selectolax==0.3.21
 
-# (sem lxml)
-
+# DB + PDF + templating
+SQLAlchemy==2.0.32
+Jinja2==3.1.4
+reportlab==4.2.2
