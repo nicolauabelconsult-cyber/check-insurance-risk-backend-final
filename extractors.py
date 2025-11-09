@@ -1,48 +1,56 @@
 # extractors.py
-from __future__ import annotations
+import re
+from typing import List, Dict, Any, Optional
 import httpx
 from bs4 import BeautifulSoup
 
-def _fetch_html(url: str) -> BeautifulSoup:
-    headers = {
-        "User-Agent": "CIRBot/1.0 (+https://checkinsurancerisk.com)",
-        "Accept": "text/html,application/xhtml+xml",
-    }
-    r = httpx.get(url, headers=headers, timeout=20.0, follow_redirects=True)
-    r.raise_for_status()
-    return BeautifulSoup(r.text, "lxml")
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip()).upper()
 
-def extract_governo_ministro(url: str) -> list[dict]:
+def extract_gov_ao_ministros(url: str, hint: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Extrai nomes de ministros da página governo.gov.ao/ministro.
-    Heurísticas robustas: links para perfis, headings em cartões, etc.
-    Retorna uma lista de facts do tipo {'type':'PEP','name':..., 'source':url}.
+    Lê https://governo.gov.ao/ministro e devolve uma lista de dicts com nomes dos ministros.
+    Estrutura de saída:
+      [{ "type": "person", "name": "MANUEL GOMES DA CONCEIÇÃO HOMEM", "role": "MINISTRO DO INTERIOR" }, ...]
     """
-    soup = _fetch_html(url)
-    names = set()
+    res = httpx.get(url, timeout=20)
+    res.raise_for_status()
+    soup = BeautifulSoup(res.text, "lxml")
 
-    # 1) anchors com caminho típico de perfis
-    for a in soup.select("a[href]"):
-        href = (a.get("href") or "").lower()
-        txt = (a.get_text(" ", strip=True) or "").strip()
-        if not txt:
-            continue
-        if "/ministro" in href or "/ministr" in href or "/perfil" in href:
-            names.add(txt)
+    items: List[Dict[str, Any]] = []
+    # O HTML do site tem cartões dos ministros; vamos procurar por blocos com títulos e nomes
+    # Os seletores abaixo são resilientes mas simples; ajusta se o HTML mudar
+    cards = soup.select("div.card, div.views-row, div[class*='col']")  # fallback amplo
+    if not cards:
+        cards = [soup]  # varre globalmente
 
-    # 2) headings de cartões (muitos sites usam h3/h4)
-    for h in soup.select("h2, h3, h4"):
-        txt = (h.get_text(" ", strip=True) or "").strip()
-        if txt and len(txt.split()) >= 2:
-            # muitos nomes aparecem em CAIXA ALTA; aceitamos ambos
-            names.add(txt)
+    seen = set()
+    for blk in cards:
+        # nome aparece frequentemente em <a> ou <h3>/<h4> com classes visíveis; vamos apanhar links e headings
+        cand = []
+        cand += [a.get_text(" ", strip=True) for a in blk.select("a")]
+        cand += [h.get_text(" ", strip=True) for h in blk.select("h1,h2,h3,h4,h5")]
+        # filtra nomes com heurística (muitas letras, espaços, sem URL)
+        for txt in cand:
+            t = _norm(txt)
+            # regras simples para nomes próprios (podes refinar)
+            if len(t) >= 10 and "MINISTRO" not in t and not t.startswith("GOVERNO") and not t.endswith("VER MAIS"):
+                # valida que parece nome (tem espaços e letras)
+                if re.search(r"[A-ZÁÂÃÉÊÍÓÔÕÚÇ]{2,}\s+[A-ZÁÂÃÉÊÍÓÔÕÚÇ]{2,}", t):
+                    if t not in seen:
+                        seen.add(t)
+                        # tentar captar um "role" perto (ex: MINISTRO DO INTERIOR)
+                        role = None
+                        role_el = blk.find(text=re.compile(r"MINISTRO", re.I))
+                        if role_el:
+                            role = _norm(str(role_el))
+                        items.append({"type": "person", "name": t, "role": role})
+    return items
 
-    facts = []
-    for n in sorted(names):
-        facts.append({
-            "type": "PEP",
-            "name": n,
-            "source": url,
-            "jurisdiction": "AO",
-        })
-    return facts
+# -------- router --------
+def run_extractor(kind: str, url_or_path: str, hint: Optional[str] = None) -> List[Dict[str, Any]]:
+    kind = (kind or "").strip().lower()
+    if kind == "gov_ao_ministros":
+        return extract_gov_ao_ministros(url_or_path, hint=hint)
+    # podes acrescentar outros "kind" aqui
+    raise ValueError(f"Extractor desconhecido: {kind}")
