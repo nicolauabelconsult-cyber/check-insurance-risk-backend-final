@@ -1,4 +1,4 @@
-i# main.py  (apenas as partes alteradas / adicionadas)
+# main.py  (apenas as partes alteradas / adicionadas)
 import os, datetime as dt, time
 from typing import Optional
 
