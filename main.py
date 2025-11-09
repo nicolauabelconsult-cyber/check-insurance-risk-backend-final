@@ -466,6 +466,12 @@ def info_source_delete(id: int = Form(...), payload: dict = Depends(bearer), db:
     db.delete(item)
     db.commit()
     log(payload.get("sub"), "source-delete", {"id": id})
+    log(payload.get("sub"), "source-create", {"id": item.id})
+try:
+    build_facts_from_sources(db)   # <-- refresca já
+except Exception:
+    pass
+return {"status": "ok", "id": item.id}
     return {"status": "deleted"}
 
 # ---------- Auditoria ----------
