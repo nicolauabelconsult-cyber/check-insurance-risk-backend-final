@@ -38,6 +38,14 @@ app.add_middleware(
 # ---------- DB bootstrap ----------
 Base.metadata.create_all(bind=engine)
 
+# Popular a watchlist PEP a partir das InfoSource existentes
+with SessionLocal() as s:
+    try:
+        build_facts_from_sources(s)
+    except Exception:
+        pass
+
+
 def get_db():
     db = SessionLocal()
     try:
