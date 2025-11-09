@@ -1,3 +1,4 @@
+# Web
 fastapi==0.115.0
 uvicorn==0.30.6
 
@@ -5,10 +6,22 @@ uvicorn==0.30.6
 python-jose[cryptography]==3.3.0
 cryptography==42.0.7
 
-# Password hashing
+# Password hashing (usa passlib + bcrypt)
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
+
+# Form-data (UploadFile/File/Form)
 python-multipart==0.0.9
 
-# Pydantic extra (evita o erro do email-validator)
+# Evita o erro do pydantic[email] (email-validator ausente)
 email-validator==2.1.0.post1
+
+# ORM / DB
+SQLAlchemy==2.0.32
+# Se estiveres a usar Postgres no Render, adiciona (caso contrário, se for SQLite, NÃO é preciso):
+# psycopg2-binary==2.9.9
+
+# (Opcional – se usares os parsers/IA/ingest)
+httpx==0.27.2
+beautifulsoup4==4.12.3
+rapidfuzz==3.9.6
