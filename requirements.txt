@@ -1,28 +1,14 @@
-# Web
 fastapi==0.115.0
 uvicorn==0.30.6
-
-# Auth / JWT
 python-jose[cryptography]==3.3.0
 cryptography==42.0.7
-
-# Password hashing
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.9
-
-# Extra pydantic/email
 email-validator==2.1.0.post1
-
-# DB
 SQLAlchemy==1.4.52
 greenlet==3.0.3
-
-# Utilitários
 requests==2.32.3
 beautifulsoup4==4.12.3
 html5lib==1.1
-
-# PDF
 reportlab==4.2.0
-
