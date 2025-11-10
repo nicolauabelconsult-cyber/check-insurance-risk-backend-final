@@ -1,7 +1,7 @@
 # extractors.py
 import re
-import httpx
 from bs4 import BeautifulSoup
+from net import fetch  # <— usa o helper
 
 # --------- util de normalização de nome ----------
 def _norm(s: str) -> str:
