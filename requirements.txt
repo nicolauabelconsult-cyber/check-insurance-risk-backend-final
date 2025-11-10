@@ -1,3 +1,4 @@
+# Web
 fastapi==0.115.0
 uvicorn==0.30.6
 
@@ -10,17 +11,18 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.9
 
-# Pydantic extra (evita o erro do email-validator)
+# Extra pydantic/email
 email-validator==2.1.0.post1
 
-# DB / ORM
-SQLAlchemy==2.0.31
-greenlet==3.0.3          # opcional, mas recomendado para melhor performance
+# DB
+SQLAlchemy==1.4.52
+greenlet==3.0.3
 
-# HTTP + HTML parsing 100% Python (sem lxml/selectolax)
+# Utilitários
 requests==2.32.3
 beautifulsoup4==4.12.3
 html5lib==1.1
 
 # PDF
-reportlab==4.2.2
+reportlab==4.2.0
+
