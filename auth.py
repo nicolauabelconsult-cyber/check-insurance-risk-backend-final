@@ -1,27 +1,35 @@
-import os, time
-from typing import Optional
-from jose import jwt, JWTError
-from passlib.context import CryptContext
+# auth.py
+import os
+import time
+import hashlib
+import hmac
+from typing import Optional, Dict, Any
+
+import jwt  # PyJWT
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 JWT_ALG = "HS256"
-JWT_TTL = int(os.getenv("JWT_TTL", "86400"))
+JWT_EXP_SECONDS = 60 * 60 * 8  # 8h
 
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def hash_pw(p: str) -> str:
-    return pwd.hash(p)
-
-def verify_pw(p: str, hashed: str) -> bool:
-    return pwd.verify(p, hashed)
-
-def create_token(sub: str, name: str, role: str) -> str:
+def create_token(*, sub: str, name: str, role: str) -> str:
     now = int(time.time())
-    payload = {"sub": sub, "name": name, "role": role, "iat": now, "exp": now + JWT_TTL}
+    payload = {
+        "sub": sub,
+        "name": name,
+        "role": role,
+        "iat": now,
+        "exp": now + JWT_EXP_SECONDS,
+    }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-def decode_token(token: str) -> dict:
-    try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-    except JWTError as e:
-        raise Exception("Invalid token") from e
+def decode_token(token: str) -> Dict[str, Any]:
+    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+
+# Passwords
+def hash_pw(pw: str) -> str:
+    # bcrypt já vem via passlib[bcrypt], mas podemos usar SHA256 HMAC simples
+    # se quiseres trocar para passlib, adapta aqui.
+    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+
+def verify_pw(pw: str, hashed: str) -> bool:
+    return hmac.compare_digest(hash_pw(pw), hashed)
