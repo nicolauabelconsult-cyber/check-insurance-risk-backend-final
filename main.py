@@ -328,3 +328,7 @@ def diag_imports():
             mods[m] = f"missing: {type(e).__name__}: {e}"
     return {"python": "ok", "modules": mods}
 
+@app.get("/diag/token-key")
+def token_key():
+    import os
+    return {"JWT_SECRET": os.getenv("JWT_SECRET", "missing")}
