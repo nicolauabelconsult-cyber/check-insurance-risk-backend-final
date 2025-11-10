@@ -27,7 +27,7 @@ def _extract_gov_ao_ministros(url: str, hint: str | None = None):
     Extrai nomes/cargos da página de ministros do Gov. Angola.
     Retorna lista de dicts: {name, cargo, source}
     """
-    resp = httpx.get(url, timeout=30.0)
+    html = fetch(url), timeout=30.0)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html5lib")
 
