@@ -1,7 +1,7 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 class LoginReq(BaseModel):
-    email: EmailStr
+    email: str
     password: str
 
 class LoginResp(BaseModel):
@@ -11,4 +11,4 @@ class LoginResp(BaseModel):
 
 class RiskCheckReq(BaseModel):
     identifier: str
-    identifier_type: str
+    identifier_type: str  # "Nome" | "NIF" | etc.
