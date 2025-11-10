@@ -5,20 +5,23 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 
 SQLAlchemy==2.0.36
-greenlet==3.1.1         # tem wheels para Py 3.11 e 3.13
+# greenlet com wheels para Py 3.11 e 3.13 (necessário para SQLAlchemy sync)
+greenlet==3.1.1
 
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.9
 
-PyJWT==2.9.0            # se o seu auth usa JWT; troque se estiver a usar jose
+# JWT — vamos usar PyJWT (compatível; sem "python-jose")
+PyJWT==2.9.0
 
-reportlab==4.2.5        # para o PDF; tem wheels
+# Relatórios (PDF)
+reportlab==4.2.5
 
+# HTTP e scraping 100% em Python, sem C-extensions
 httpx==0.27.2
-beautifulsoup4==4.12.3  # parser HTML
-html5lib==1.1           # backend puro-Python p/ bs4
-
-# Opcionalmente, fixe também:
-Jinja2==3.1.4
-python-jose[cryptography]==3.3.0
 requests==2.32.3
+beautifulsoup4==4.12.3
+html5lib==1.1
+
+# Opcional (templates PDF)
+jinja2==3.1.4
