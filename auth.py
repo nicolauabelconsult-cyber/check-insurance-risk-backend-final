@@ -1,43 +1,27 @@
-# auth.py
 import os, time
-from typing import Optional, Dict, Any
-from jose import jwt
-from jose.exceptions import ExpiredSignatureError, JWTError
+from typing import Optional
+from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-# >>> DEFINA ESTE NOME DE VARIÁVEL NO RENDER <<<
-SECRET_KEY = os.getenv("JWT_SECRET", "cir-dev-secret")  # NÃO deixar default em produção
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MIN = int(os.getenv("JWT_EXPIRE_MIN", "360"))  # 6 horas por default
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_ALG = "HS256"
+JWT_TTL = int(os.getenv("JWT_TTL", "86400"))
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def hash_pw(plain: str) -> str:
-    return pwd_ctx.hash(plain)
+def hash_pw(p: str) -> str:
+    return pwd.hash(p)
 
-def verify_pw(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
+def verify_pw(p: str, hashed: str) -> bool:
+    return pwd.verify(p, hashed)
 
-def create_token(*, sub: str, name: str, role: str) -> str:
+def create_token(sub: str, name: str, role: str) -> str:
     now = int(time.time())
-    payload = {
-        "sub": sub,
-        "name": name,
-        "role": role,
-        "iat": now,
-        "exp": now + ACCESS_TOKEN_EXPIRE_MIN * 60,
-        "iss": "cir-backend",
-        "aud": "cir-frontend",
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    payload = {"sub": sub, "name": name, "role": role, "iat": now, "exp": now + JWT_TTL}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-def decode_token(token: str) -> Dict[str, Any]:
+def decode_token(token: str) -> dict:
     try:
-        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], audience="cir-frontend")
-    except ExpiredSignatureError:
-        # mensagem diferenciada para o frontend poder tratar
-        raise JWTError("expired")
-
-    except JWTError:
-        raise
-
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    except JWTError as e:
+        raise Exception("Invalid token") from e
