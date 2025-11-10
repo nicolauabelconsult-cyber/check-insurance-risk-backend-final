@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 
 import jwt  # PyJWT
 
-JWT_SECRET = "checkrisk-2025-master-key"
+SECRET = os.getenv("JWT_SECRET") or os.urandom(32).hex()
 JWT_ALG = "HS256"
 JWT_EXP_SECONDS = 60 * 60 * 8  # 8h
 
