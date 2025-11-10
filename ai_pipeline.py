@@ -1,73 +1,73 @@
-# extractors.py
-import re
-from typing import List, Dict, Optional
-import requests
-from bs4 import BeautifulSoup
+# ai_pipeline.py
+from typing import Dict, Optional
+from sqlalchemy.orm import Session
+from models import InfoSource
+from extractors import run_extractor
 
-def _norm(s: str) -> str:
-    return re.sub(r'\s+', ' ', s or '').strip()
+def rebuild_watchlist(db: Session) -> None:
+    # opcional: se quiser pré-carregar para cache/ficheiro; não obrigatório
+    pass
 
-def extract_gov_ao_ministros(url: str, hint: Optional[str] = None) -> List[Dict]:
+def build_facts_from_sources(
+    identifier_value: Optional[str] = None,
+    identifier_type: Optional[str] = None,
+    db: Optional[Session] = None,
+) -> Dict:
     """
-    Lê https://governo.gov.ao/ministro e devolve uma lista de dicts:
-    {name, cargo, source}
+    Se 'identifier_type' for 'Nome', tenta encontrar correspondência PEP nas fontes.
     """
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
+    out = {
+        "ai_status": "no_data",
+        "ai_reason": "Sem fontes configuradas ou sem resultados.",
+        "pep": {"value": False},
+        "sanctions": {"value": False},
+    }
+    if db is None:
+        return out
 
-    # html5lib evita lxml e funciona bem com HTML "imperfeito"
-    soup = BeautifulSoup(resp.text, "html5lib")
+    sources = db.query(InfoSource).order_by(InfoSource.id.desc()).all()
+    if not sources:
+        out["ai_reason"] = "Nenhuma fonte registada."
+        return out
 
-    items = []
-    # Cada ministro aparece num "card"
-    cards = soup.select("div.card, div.col-12")
-    if not cards:
-        # fallback: procurar por headings + links
-        cards = soup.select("h3, h4, .title, .ministro, .minister")
+    name = (identifier_value or "").strip()
+    t = (identifier_type or "").strip().lower()
+    any_hits = False
 
-    for c in cards:
-        text = _norm(c.get_text(" ", strip=True))
-        if not text:
+    for s in sources:
+        kind = (s.categoria or "").strip().lower()
+        url_or_path = s.url or (
+            f"{(s.directory or '').rstrip('/')}/{(s.filename or '').lstrip('/')}"
+            if s.directory and s.filename else None
+        )
+        if not kind or not url_or_path:
             continue
 
-        # Heurísticas simples: linha com nome em MAIÚSCULAS geralmente é o ministro
-        # e uma linha próxima com "Ministro" é o cargo
-        mname = None
-        mcargo = None
+        try:
+            facts = run_extractor(kind, url_or_path, hint=s.validade)
+        except Exception:
+            continue
 
-        # tentar apanhar texto em destaque
-        strongs = [ _norm(x.get_text(" ", strip=True)) for x in c.select("strong, b") ]
-        for s in strongs:
-            if len(s.split()) >= 2 and s.upper() == s:
-                mname = s
-                break
+        # matching simples por igualdade (normalizar maiúsculas/mínusculas e espaços)
+        if name and t in {"nome", "name"}:
+            for f in facts:
+                cand = (f.get("name") or "").strip().lower()
+                if cand and cand == name.strip().lower():
+                    out["pep"] = {
+                        "value": True,
+                        "matched_name": f.get("name"),
+                        "cargo": f.get("cargo"),
+                        "score": 0.95,
+                        "source": s.title or s.url or s.filename,
+                    }
+                    any_hits = True
+                    break
 
-        # se não encontrou, usar a primeira linha "marcante"
-        if not mname:
-            # procurar padrão tipo "MANUEL GOMES DA CONCEIÇÃO HOMEM"
-            m = re.search(r'([A-ZÁÂÃÉÊÍÓÔÕÚÇ][A-ZÁÂÃÉÊÍÓÔÕÚÇ\s\-]{8,})', text)
-            if m:
-                mname = _norm(m.group(1))
+    out["ai_status"] = "ok" if any_hits else "no_match"
+    out["ai_reason"] = "Correspondência exata por nome." if any_hits else "Nenhuma correspondência pelo nome."
+    return out
 
-        # cargo
-        mcargo = None
-        cargo_candidates = re.findall(r'(Ministro[a|o]?[^|,\n]+)', text, flags=re.I)
-        if cargo_candidates:
-            mcargo = _norm(cargo_candidates[0])
-
-        if mname:
-            items.append({
-                "name": mname,
-                "cargo": mcargo or "Ministro",
-                "source": url,
-            })
-
-    return items
-
-# Router de extractors
-def run_extractor(kind: str, url_or_path: str, hint: Optional[str] = None) -> List[Dict]:
-    kind = (kind or "").strip().lower()
-    if kind in {"gov_ao_ministros", "gov_ao_ministro"}:
-        return extract_gov_ao_ministros(url_or_path, hint=hint)
-    # adicionar outros extractors conforme necessário
-    return []
+# opcional, se quiser chamar diretamente
+def is_pep_name(name: str, db: Session) -> bool:
+    res = build_facts_from_sources(identifier_value=name, identifier_type="Nome", db=db)
+    return bool(res.get("pep", {}).get("value"))
