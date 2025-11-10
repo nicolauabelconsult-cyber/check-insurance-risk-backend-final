@@ -171,8 +171,7 @@ def risk_check(req: RiskCheckReq, payload: dict = Depends(bearer), db: Session =
 
     # 2.1) heurística por nome (watchlist já montada)
     try:
-        if (req.identifier_type or "").strip().lower() in {"nome", "name"} and is_pep_name(req.identifier):
-            pep = True
+       if (req.identifier_type or "").strip().lower() in {"nome", "name"} and is_pep_name(req.identifier, db):
             justificacao = f"{justificacao} | Watchlist indica possível PEP por nome."
     except Exception:
         pass
