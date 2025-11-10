@@ -1,52 +1,85 @@
-import re, requests
+# extractors.py
+import re
+import httpx
 from bs4 import BeautifulSoup
-html = httpx.get(url, timeout=20).text
-soup = BeautifulSoup(html, "html5lib")   # evita lxml
 
+# --------- util de normalização de nome ----------
 def _norm(s: str) -> str:
-    return " ".join(re.sub(r"\s+", " ", s or "").strip().split()).upper()
+    s = s or ""
+    s = s.strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    # remove acentos básicos
+    repl = (
+        ("á", "a"), ("à", "a"), ("â", "a"), ("ã", "a"),
+        ("é", "e"), ("ê", "e"),
+        ("í", "i"),
+        ("ó", "o"), ("ô", "o"), ("õ", "o"),
+        ("ú", "u"),
+        ("ç", "c"),
+    )
+    for a, b in repl:
+        s = s.replace(a, b)
+    return s
 
-def extract_gov_ao_ministros(url: str):
+# --------- extractores ----------
+def _extract_gov_ao_ministros(url: str, hint: str | None = None):
     """
-    Extrai nomes de ministros do portal Governo de Angola.
-    Heurística robusta: pega textos em CAPS das "cards".
+    Extrai nomes/cargos da página de ministros do Gov. Angola.
+    Retorna lista de dicts: {name, cargo, source}
     """
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html5lib")
+    resp = httpx.get(url, timeout=30.0)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html5lib")
 
-    # 1) todos os títulos/link-text dentro de cards contendo 'MINISTRO'
-    cards = soup.select("div.card, div[class*=card], article, .ministro, .ministros")
-    texts = []
+    cards = []
+    # A página usa cartões com o cargo e o nome em destaque
+    # Vamos procurar por regiões com o texto "MINISTROS" e cartões abaixo.
+    for card in soup.select("div.card, div.col, article, section"):
+        txt = " ".join(card.stripped_strings).lower()
+        if not txt:
+            continue
+        # heurística: contém "ministro" e tem letras suficientes
+        if "ministro" in txt and len(txt) > 30:
+            # tenta detectar nome em CAIXA/realce (comum na página)
+            # fallback: primeira sequência de 3+ palavras todas com inicial maiúscula
+            name = None
+            # elementos com destaque (strong/h2/h3)
+            for el in card.select("strong, b, h2, h3"):
+                s = el.get_text(strip=True)
+                if s and len(s.split()) >= 2:
+                    name = s
+                    break
+            if not name:
+                # fallback bem simples
+                m = re.search(r"([A-ZÁÂÃÉÊÍÓÔÕÚÇ]{2,}(?:\s+[A-ZÁÂÃÉÊÍÓÔÕÚÇ]{2,}){1,5})", " ".join(card.stripped_strings))
+                if m:
+                    name = m.group(1)
+            # cargo
+            cargo = None
+            m2 = re.search(r"(ministro[^\n,.;]*)", txt)
+            if m2:
+                cargo = m2.group(1).strip()
+
+            if name:
+                cards.append({
+                    "name": name.strip(),
+                    "cargo": cargo or "ministro",
+                    "source": url,
+                })
+
+    # dedup simples por nome normalizado
+    out = []
+    seen = set()
     for c in cards:
-        for el in c.find_all(["h1","h2","h3","h4","a","strong","div","span"]):
-            t = _norm(el.get_text(" "))
-            if len(t) >= 8 and any(word in t for word in ["MINISTRO", "MINISTRA"]) or re.search(r"[A-Z]{2,}\s[A-Z]{2,}", t):
-                texts.append(t)
+        k = _norm(c["name"])
+        if k and k not in seen:
+            seen.add(k)
+            out.append(c)
+    return out
 
-    # 2) heurística: manter linhas com 2+ palavras em caps (potenciais nomes)
-    names = set()
-    for t in texts:
-        # remove prefixos tipo "MINISTRO DO INTERIOR"
-        t = re.sub(r"\bMINISTROS?\b.*", "", t).strip()
-        # mantém padrões com espaços e letras
-        if re.search(r"[A-Z]{2,}\s+[A-Z]{2,}", t):
-            # corta sufixos comuns
-            t = re.sub(r"\bDATA DE NOMEAÇÃO.*", "", t).strip(" -:•")
-            if 6 < len(t) < 80:
-                names.add(t)
-
-    # alguns sites usam cards muito “ricos”; como salvaguarda, tenta links <a> com caps
-    if not names:
-        for a in soup.find_all("a"):
-            t = _norm(a.get_text(" "))
-            if re.search(r"[A-Z]{2,}\s+[A-Z]{2,}", t):
-                names.add(t)
-    return sorted(names)
-
-def run_extractor(kind: str, url_or_path: str, hint: str = None):
+def run_extractor(kind: str, url_or_path: str, hint: str | None = None):
     kind = (kind or "").strip().lower()
-    if kind == "gov_ao_ministros":
-        return [{"name": n, "source": url_or_path, "cargo": "Ministro(a)", "score": 0.95} for n in extract_gov_ao_ministros(url_or_path)]
-    # outros kinds podem ser implementados aqui
+    if kind in {"gov_ao_ministros", "gov_ao_ministro", "gov_ao"}:
+        return _extract_gov_ao_ministros(url_or_path, hint=hint)
+    # add outros extractores aqui no futuro
     return []
