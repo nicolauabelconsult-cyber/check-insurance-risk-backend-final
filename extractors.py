@@ -1,5 +1,7 @@
 import re, requests
 from bs4 import BeautifulSoup
+html = httpx.get(url, timeout=20).text
+soup = BeautifulSoup(html, "html5lib")   # evita lxml
 
 def _norm(s: str) -> str:
     return " ".join(re.sub(r"\s+", " ", s or "").strip().split()).upper()
