@@ -1,45 +1,73 @@
-# ai_pipeline.py
-from sqlalchemy.orm import Session
-from models import InfoSource
-from extractors import run_extractor
+# extractors.py
+import re
+from typing import List, Dict, Optional
+import requests
+from bs4 import BeautifulSoup
 
-def build_facts_from_sources(identifier_value: str | None = None,
-                             identifier_type: str | None = None,
-                             db: Session | None = None) -> dict:
-    out = {"ai_status":"no_data","ai_reason":"Sem fontes configuradas.","pep":{}, "sanctions":{}}
-    if not db:
-        return out
+def _norm(s: str) -> str:
+    return re.sub(r'\s+', ' ', s or '').strip()
 
-    sources = db.query(InfoSource).all()
-    if not sources:
-        return out
+def extract_gov_ao_ministros(url: str, hint: Optional[str] = None) -> List[Dict]:
+    """
+    Lê https://governo.gov.ao/ministro e devolve uma lista de dicts:
+    {name, cargo, source}
+    """
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
 
-    found = []
-    for s in sources:
-        kind = (s.categoria or "").strip().lower()
-        url_or_path = s.url or (f"{(s.directory or '').rstrip('/')}/{(s.filename or '').lstrip('/')}" if s.directory and s.filename else None)
-        if not kind or not url_or_path:
+    # html5lib evita lxml e funciona bem com HTML "imperfeito"
+    soup = BeautifulSoup(resp.text, "html5lib")
+
+    items = []
+    # Cada ministro aparece num "card"
+    cards = soup.select("div.card, div.col-12")
+    if not cards:
+        # fallback: procurar por headings + links
+        cards = soup.select("h3, h4, .title, .ministro, .minister")
+
+    for c in cards:
+        text = _norm(c.get_text(" ", strip=True))
+        if not text:
             continue
-        try:
-            facts = run_extractor(kind, url_or_path, hint=s.validade)
-            found.extend(facts)
-        except Exception:
-            continue
 
-    if not found:
-        out["ai_status"]="no_match"; out["ai_reason"]="Sem correspondências nas fontes."
-        return out
+        # Heurísticas simples: linha com nome em MAIÚSCULAS geralmente é o ministro
+        # e uma linha próxima com "Ministro" é o cargo
+        mname = None
+        mcargo = None
 
-    # match muito simples por nome
-    name_q = (identifier_value or "").strip().lower()
-    for f in found:
-        if f.get("type") == "pep" and name_q and name_q in (f.get("name","").lower()):
-            out["pep"] = {"value": True, "matched_name": f.get("name"), "cargo": f.get("cargo"), "source": f.get("source"), "score": f.get("score")}
-            out["ai_status"]="ok"; out["ai_reason"]="Correspondência encontrada."
-            break
+        # tentar apanhar texto em destaque
+        strongs = [ _norm(x.get_text(" ", strip=True)) for x in c.select("strong, b") ]
+        for s in strongs:
+            if len(s.split()) >= 2 and s.upper() == s:
+                mname = s
+                break
 
-    return out
+        # se não encontrou, usar a primeira linha "marcante"
+        if not mname:
+            # procurar padrão tipo "MANUEL GOMES DA CONCEIÇÃO HOMEM"
+            m = re.search(r'([A-ZÁÂÃÉÊÍÓÔÕÚÇ][A-ZÁÂÃÉÊÍÓÔÕÚÇ\s\-]{8,})', text)
+            if m:
+                mname = _norm(m.group(1))
 
-# (opcional)
-def rebuild_watchlist(db: Session):  # agora “noop”, mantemos para compatibilidade
-    return
+        # cargo
+        mcargo = None
+        cargo_candidates = re.findall(r'(Ministro[a|o]?[^|,\n]+)', text, flags=re.I)
+        if cargo_candidates:
+            mcargo = _norm(cargo_candidates[0])
+
+        if mname:
+            items.append({
+                "name": mname,
+                "cargo": mcargo or "Ministro",
+                "source": url,
+            })
+
+    return items
+
+# Router de extractors
+def run_extractor(kind: str, url_or_path: str, hint: Optional[str] = None) -> List[Dict]:
+    kind = (kind or "").strip().lower()
+    if kind in {"gov_ao_ministros", "gov_ao_ministro"}:
+        return extract_gov_ao_ministros(url_or_path, hint=hint)
+    # adicionar outros extractors conforme necessário
+    return []
