@@ -316,3 +316,15 @@ def ai_test_source(id: int, payload: dict = Depends(bearer), db: Session = Depen
     if not kind or not url_or_path: return {"count": 0, "sample": [], "message": "Fonte sem categoria (kind) ou URL/ficheiro."}
     facts = run_extractor(kind, url_or_path, hint=src.validade)
     return {"count": len(facts), "sample": facts[:20]}
+
+@app.get("/diag/imports")
+def diag_imports():
+    mods = {}
+    for m in ("httpx", "requests", "bs4", "sqlalchemy", "uvicorn", "fastapi"):
+        try:
+            __import__(m)
+            mods[m] = "ok"
+        except Exception as e:
+            mods[m] = f"missing: {type(e).__name__}: {e}"
+    return {"python": "ok", "modules": mods}
+
