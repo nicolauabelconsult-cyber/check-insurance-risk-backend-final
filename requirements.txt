@@ -10,10 +10,17 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.9
 
-# Pydantic extra (evita o email-validator do pydantic)
+# Pydantic extra (evita o erro do email-validator)
 email-validator==2.1.0.post1
 
-# HTTP + HTML parsing 100% Python
+# DB / ORM
+SQLAlchemy==2.0.31
+greenlet==3.0.3          # opcional, mas recomendado para melhor performance
+
+# HTTP + HTML parsing 100% Python (sem lxml/selectolax)
 requests==2.32.3
 beautifulsoup4==4.12.3
 html5lib==1.1
+
+# PDF
+reportlab==4.2.2
