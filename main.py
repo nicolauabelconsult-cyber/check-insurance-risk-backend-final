@@ -35,6 +35,7 @@ from schemas import (
     RiskHistoryItem,
     InfoSourceRead,
     AuditLogRead,
+    RiskDecisionUpdate,
 )
 from security import (
     get_db,
@@ -51,7 +52,7 @@ from utils import ensure_dir
 # Criar tabelas
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Check Insurance Risk Backend", version="1.0.0")
+app = FastAPI(title="Check Insurance Risk Backend", version="3.0.0")
 
 
 # ---------------------- CORS ----------------------
@@ -90,7 +91,7 @@ def log_event(
 def create_initial_admin():
     """
     Cria um utilizador admin inicial (username=admin / password=admin123)
-    se ainda não existir. Depois podes alterar pelo módulo de utilizadores.
+    se ainda não existir.
     """
     db = Session(bind=engine)
     try:
@@ -292,20 +293,17 @@ async def upload_infosource(
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Apenas ficheiros CSV são suportados nesta versão.")
 
-    # Guardar ficheiro
     ensure_dir(UPLOAD_DIR)
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(file_path, "wb") as f:
         f.write(await file.read())
 
-    # Ler cabeçalho e linhas
     with open(file_path, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames or []
         if not headers:
             raise HTTPException(status_code=400, detail="CSV sem cabeçalho.")
 
-        # Determinar mapping
         if mapping_json:
             mapping = json.loads(mapping_json)
         else:
@@ -317,7 +315,6 @@ async def upload_infosource(
                 detail="Não foi possível identificar a coluna do nome. Envia mapping_json explícito.",
             )
 
-        # Criar InfoSource
         src = InfoSource(
             name=name,
             source_type=source_type.upper(),
@@ -329,7 +326,6 @@ async def upload_infosource(
         db.commit()
         db.refresh(src)
 
-        # Inserir NormalizedEntity
         num_records = 0
         for row in reader:
             person_name = row.get(mapping.get("name", ""), "") or None
@@ -387,37 +383,35 @@ def find_matches(
 ) -> List[Match]:
     """
     Procura matches nas entidades normalizadas,
-    usando NIF, passaporte, cartão e nome.
+    usando NIF, passaporte, cartão e nome aproximado.
     """
     matches: List[Match] = []
 
     q = db.query(NormalizedEntity, InfoSource).join(InfoSource, NormalizedEntity.source_id == InfoSource.id)
 
-    # Se tiver NIF, tentamos primeiro por NIF
     if req.nif:
         candidates = (
             q.filter(func.lower(NormalizedEntity.person_nif) == req.nif.lower())
-            .limit(100)
+            .limit(200)
             .all()
         )
     elif req.passport:
         candidates = (
             q.filter(func.lower(NormalizedEntity.person_passport) == req.passport.lower())
-            .limit(100)
+            .limit(200)
             .all()
         )
     elif req.residence_card:
         candidates = (
             q.filter(func.lower(NormalizedEntity.residence_card) == req.residence_card.lower())
-            .limit(100)
+            .limit(200)
             .all()
         )
     else:
-        # Pesquisa por nome aproximado
         name = req.full_name.strip().upper()
         candidates = (
             q.filter(func.upper(NormalizedEntity.person_name).like(f"%{name}%"))
-            .limit(100)
+            .limit(200)
             .all()
         )
 
@@ -426,7 +420,6 @@ def find_matches(
 
     for entity, src in candidates:
         similarity = sim(req.full_name, entity.person_name or "")
-        # Se estivermos por NIF/passaporte, aceitamos tudo; se for só nome, impomos threshold
         if not any([req.nif, req.passport, req.residence_card]) and similarity < 0.6:
             continue
 
@@ -459,7 +452,6 @@ def compute_risk_from_matches(
     is_pep = False
     has_sanctions = False
 
-    # Regras baseadas nas fontes
     for m in matches:
         st = (m.source_type or "").upper()
         if st == "PEP":
@@ -477,16 +469,13 @@ def compute_risk_from_matches(
             factors.append(RiskFactor(code="CLAIMS", description="Histórico de sinistros relevante", weight=30))
             score += 30
 
-    # Penalização leve se não houver NIF
     if not req.nif:
         factors.append(RiskFactor(code="NO_NIF", description="NIF não fornecido", weight=10))
         score += 10
 
-    # Se não há matches negativos e há identificação completa, risco baixo
     if score == 0 and req.nif:
         factors.append(RiskFactor(code="CLEAN", description="Sem ocorrências negativas nas fontes", weight=0))
 
-    # Normalizar score (0-100)
     score = max(0, min(score, 100))
 
     if score <= 30:
@@ -530,6 +519,7 @@ def risk_check(
         decision=None,
         analyst_notes=payload.extra_info or "",
         analyst_id=current_user.id,
+        primary_match_json=None,
     )
     db.add(record)
     db.commit()
@@ -556,6 +546,65 @@ def risk_check(
         has_sanctions=record.has_sanctions,
         matches=matches,
         factors=factors,
+        decision=record.decision,
+        analyst_notes=record.analyst_notes,
+        created_at=record.created_at,
+    )
+
+
+# ---------------------- Decisão do analista ----------------------
+
+@app.patch("/risk/{record_id}/decision", response_model=RiskCheckResponse)
+def update_risk_decision(
+    record_id: int,
+    payload: RiskDecisionUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    request: Request = None,
+):
+    record = db.query(RiskRecord).filter(RiskRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Registo de risco não encontrado")
+
+    if record.analyst_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Apenas o analista criador ou um admin pode alterar a decisão.")
+
+    record.decision = payload.decision
+    if payload.analyst_notes is not None:
+        record.analyst_notes = payload.analyst_notes
+
+    matches = json.loads(record.matches_json)
+
+    if payload.primary_match_index is not None:
+        idx = payload.primary_match_index
+        if 0 <= idx < len(matches):
+            record.primary_match_json = json.dumps(matches[idx], ensure_ascii=False)
+        else:
+            raise HTTPException(status_code=400, detail="primary_match_index fora de intervalo.")
+    db.commit()
+    db.refresh(record)
+
+    ip = request.client.host if request and request.client else None
+    log_event(
+        db,
+        "update_risk_decision",
+        user=current_user,
+        details=f"Actualizou decisão de RiskRecord {record.id} para {record.decision}",
+        ip_address=ip,
+    )
+
+    return RiskCheckResponse(
+        id=record.id,
+        full_name=record.full_name,
+        nif=record.nif,
+        passport=record.passport,
+        residence_card=record.residence_card,
+        risk_score=record.risk_score,
+        risk_level=record.risk_level,
+        is_pep=record.is_pep,
+        has_sanctions=record.has_sanctions,
+        matches=[Match(**m) for m in matches],
+        factors=[RiskFactor(**f) for f in json.loads(record.factors_json)],
         decision=record.decision,
         analyst_notes=record.analyst_notes,
         created_at=record.created_at,
@@ -606,7 +655,6 @@ def download_risk_report(
     current_user: User = Depends(get_current_user),
     request: Request = None,
 ):
-    # Garantir que o registo existe e pertence ao sistema
     record = db.query(RiskRecord).filter(RiskRecord.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Registo de risco não encontrado")
