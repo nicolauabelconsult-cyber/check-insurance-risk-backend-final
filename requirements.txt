@@ -2,6 +2,5 @@ fastapi
 uvicorn[standard]
 SQLAlchemy
 python-multipart
-passlib
 python-jose
 reportlab
