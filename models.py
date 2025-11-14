@@ -83,8 +83,12 @@ class RiskRecord(Base):
     is_pep = Column(Boolean, default=False)
     has_sanctions = Column(Boolean, default=False)
 
-    matches_json = Column(Text, nullable=False)  # JSON serializado: lista de matches
-    factors_json = Column(Text, nullable=False)  # JSON serializado: lista de factores
+    # Lista completa de matches e factores (JSON serializado)
+    matches_json = Column(Text, nullable=False)
+    factors_json = Column(Text, nullable=False)
+
+    # Match principal escolhido pelo analista (opcional)
+    primary_match_json = Column(Text, nullable=True)
 
     decision = Column(String(50), nullable=True)  # ACCEPT, CONDITIONAL, REJECT
     analyst_notes = Column(Text, nullable=True)
