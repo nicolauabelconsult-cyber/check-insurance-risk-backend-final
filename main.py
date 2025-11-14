@@ -1,15 +1,4 @@
-import os, zipfile, textwrap, shutil
-
-base_dir = "/mnt/data/CIR_corrigido"
-backend_dir = os.path.join(base_dir, "backend")
-frontend_dir = os.path.join(base_dir, "frontend")
-
-os.makedirs(backend_dir, exist_ok=True)
-os.makedirs(frontend_dir, exist_ok=True)
-
-# ---------------------- Write backend files ----------------------
-
-main_py = """import os
+import os
 import time
 import datetime as dt
 from typing import Optional
