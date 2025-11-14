@@ -1,133 +1,151 @@
 # ai_pipeline.py
-import json
-import os
-import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 
 from models import InfoSource
 from extractors import run_extractor
+import re
 
-WATCHLIST_PATH = os.getenv("WATCHLIST_PATH", "data/watchlist.json")
-
-# ---------------- utils ----------------
+# mesma normalização de nomes que no extractor
 def _norm(s: str) -> str:
     s = s or ""
     s = s.strip().lower()
     s = re.sub(r"\s+", " ", s)
-    for a, b in (
-        ("á","a"),("à","a"),("â","a"),("ã","a"),
-        ("é","e"),("ê","e"),
-        ("í","i"),
-        ("ó","o"),("ô","o"),("õ","o"),
-        ("ú","u"),
-        ("ç","c"),
-    ):
-        s = s.replace(a,b)
+    repl = (
+        ("á", "a"), ("à", "a"), ("â", "a"), ("ã", "a"),
+        ("é", "e"), ("ê", "e"),
+        ("í", "i"),
+        ("ó", "o"), ("ô", "o"), ("õ", "o"),
+        ("ú", "u"),
+        ("ç", "c"),
+    )
+    for a, b in repl:
+        s = s.replace(a, b)
     return s
 
-def _load_watchlist() -> List[Dict[str, Any]]:
-    if os.path.exists(WATCHLIST_PATH):
-        try:
-            with open(WATCHLIST_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
+# watchlist em memória (reconstruída no startup ou quando crias/apagas fontes)
+_watchlist: list[dict[str, Any]] = []
 
-def _save_watchlist(rows: List[Dict[str, Any]]):
-    os.makedirs(os.path.dirname(WATCHLIST_PATH) or ".", exist_ok=True)
-    with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
+def rebuild_watchlist(db: Session) -> None:
+    """
+    Lê todas as InfoSource e constrói uma watchlist em memória com nomes PEP.
+    """
+    global _watchlist
+    _watchlist = []
 
-# ---------------- API pública ----------------
-def rebuild_watchlist(db: Session) -> int:
-    """
-    Varre InfoSource e constrói uma watchlist de PEP (nomes/cargos/fonte).
-    """
-    rows = []
     sources = db.query(InfoSource).all()
-    for s in sources:
-        kind = (s.categoria or "").strip().lower()
-        url_or_path = s.url or (f"{(s.directory or '').rstrip('/')}/{(s.filename or '').lstrip('/')}"
-                                if (s.directory and s.filename) else None)
+    for src in sources:
+        kind = (src.categoria or "").strip().lower()
+        url_or_path = src.url or (
+            f"{(src.directory or '').rstrip('/')}/{(src.filename or '').lstrip('/')}"
+            if (src.directory and src.filename) else None
+        )
         if not kind or not url_or_path:
             continue
+
         try:
-            facts = run_extractor(kind, url_or_path, hint=s.validade)
-            for f in facts:
-                nm = f.get("name")
-                if nm:
-                    rows.append({
-                        "name": nm.strip(),
-                        "cargo": f.get("cargo"),
-                        "source": f.get("source") or url_or_path,
-                        "kind": kind,
-                    })
+            facts = run_extractor(kind, url_or_path, hint=src.validade)
         except Exception:
-            # não bloqueia
-            pass
+            # se uma fonte falhar, ignoramos essa e seguimos
+            continue
+
+        for f in facts:
+            name = f.get("name")
+            if not name:
+                continue
+            _watchlist.append({
+                "norm": _norm(name),
+                "name": name,
+                "cargo": f.get("cargo"),
+                "source": f.get("source") or url_or_path,
+            })
 
     # dedup por nome normalizado
-    out = []
     seen = set()
-    for r in rows:
-        k = _norm(r["name"])
-        if k and k not in seen:
-            seen.add(k)
-            out.append(r)
-
-    _save_watchlist(out)
-    return len(out)
+    dedup = []
+    for item in _watchlist:
+        if item["norm"] in seen:
+            continue
+        seen.add(item["norm"])
+        dedup.append(item)
+    _watchlist = dedup
 
 def is_pep_name(name: str) -> bool:
-    q = _norm(name)
-    if not q:
-        return False
-    wl = _load_watchlist()
-    return any(_norm(r.get("name")) == q for r in wl)
-
-def _best_name_match(name: str) -> Optional[Dict[str, Any]]:
-    q = _norm(name)
-    wl = _load_watchlist()
-    for r in wl:
-        if _norm(r.get("name")) == q:
-            return r
-    # tentativa fuzzy simples: começa/termina
-    for r in wl:
-        n = _norm(r.get("name"))
-        if q and (q in n or n in q):
-            return r
-    return None
-
-def build_facts_from_sources(*, identifier_value: str, identifier_type: str, db: Session) -> Dict[str, Any]:
     """
-    Executa verificação com base em:
-      1) watchlist local (rebuildada no arranque e nos CRUDs)
-      2) scraping on-demand das InfoSource (apenas para nome; pode ser estendido)
+    Verifica se o nome já existe na watchlist em memória.
     """
-    out = {"ai_status": "no_data", "ai_reason": "Nenhuma fonte consultada ainda."}
+    n = _norm(name)
+    return any(item["norm"] == n for item in _watchlist)
+
+def build_facts_from_sources(
+    identifier_value: str,
+    identifier_type: Optional[str],
+    db: Session,
+) -> Dict[str, Any]:
+    """
+    Enriquecimento on-demand: lê as InfoSource e tenta encontrar PEP/sanções.
+    Neste momento só faz match por NOME em fontes gov_ao_ministros.
+    """
+    result: Dict[str, Any] = {
+        "ai_status": "no_data",
+        "ai_reason": "Sem fontes configuradas.",
+        "pep": {},
+        "sanctions": {},
+    }
+
+    sources = db.query(InfoSource).all()
+    if not sources:
+        return result
 
     id_type = (identifier_type or "").strip().lower()
-    value = (identifier_value or "").strip()
-    if not value:
-        out["ai_reason"] = "Identificador vazio."
-        return out
+    if id_type not in {"nome", "name"}:
+        result["ai_status"] = "no_match"
+        result["ai_reason"] = "No momento as fontes configuradas só suportam pesquisa por nome."
+        return result
 
-    # 1) match na watchlist
-    if id_type in {"nome", "name"}:
-        match = _best_name_match(value)
-        if match:
-            out["ai_status"] = "ok"
-            out["ai_reason"] = "Match por nome na watchlist."
-            out["pep"] = {"value": True, "matched_name": match["name"], "cargo": match.get("cargo"),
-                          "source": match.get("source"), "score": 0.95}
-        else:
-            out["pep"] = {"value": False}
-            out["ai_status"] = "no_match"
-            out["ai_reason"] = "Nome não encontrado na watchlist."
+    name_norm = _norm(identifier_value)
+    best_match: Optional[Dict[str, Any]] = None
 
-    # 2) sanções — placeholder (sem fontes ainda)
-    out["sanctions"] = {"value": False}
+    for src in sources:
+        kind = (src.categoria or "").strip().lower()
+        url_or_path = src.url or (
+            f"{(src.directory or '').rstrip('/')}/{(src.filename or '').lstrip('/')}"
+            if (src.directory and src.filename) else None
+        )
+        if not kind or not url_or_path:
+            continue
 
-    return out
+        try:
+            facts = run_extractor(kind, url_or_path, hint=src.validade)
+        except Exception as e:
+            # devolve erro legível para o frontend
+            result["ai_status"] = "error"
+            result["ai_reason"] = f"Erro ao ler fonte '{src.title}': {e}"
+            return result
+
+        for f in facts:
+            cand_name = f.get("name")
+            if not cand_name:
+                continue
+            if _norm(cand_name) == name_norm:
+                best_match = {
+                    "value": True,
+                    "matched_name": cand_name,
+                    "cargo": f.get("cargo"),
+                    "source": f.get("source") or url_or_path,
+                    "score": 1.0,  # por enquanto, match exacto = 1.0
+                }
+                break
+
+        if best_match:
+            break
+
+    if best_match:
+        result["ai_status"] = "ok"
+        result["ai_reason"] = "Nome encontrado nas fontes configuradas."
+        result["pep"] = best_match
+    else:
+        result["ai_status"] = "no_match"
+        result["ai_reason"] = "Nenhum match exacto encontrado nas fontes configuradas."
+
+    return result
