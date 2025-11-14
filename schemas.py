@@ -98,6 +98,15 @@ class RiskHistoryItem(BaseModel):
         orm_mode = True
 
 
+class RiskDecisionUpdate(BaseModel):
+    decision: str  # ACCEPT, CONDITIONAL, REJECT
+    analyst_notes: Optional[str] = None
+    primary_match_index: Optional[int] = Field(
+        default=None,
+        description="Índice do match escolhido como principal (0, 1, 2, ...). Opcional."
+    )
+
+
 # ---------- Info Sources ----------
 
 class InfoSourceRead(BaseModel):
