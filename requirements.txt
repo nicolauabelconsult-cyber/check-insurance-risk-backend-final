@@ -1,26 +1,7 @@
-fastapi==0.115.5
-uvicorn[standard]==0.32.0
-
-pydantic==2.9.2
-pydantic-settings==2.5.2
-
-SQLAlchemy==2.0.36
-# greenlet com wheels para Py 3.11 e 3.13 (necessário para SQLAlchemy sync)
-greenlet==3.1.1
-
-passlib[bcrypt]==1.7.4
-python-multipart==0.0.9
-
-# JWT — vamos usar PyJWT (compatível; sem "python-jose")
-PyJWT==2.9.0
-
-# Relatórios (PDF)
-reportlab==4.2.5
-
-# HTTP e scraping 100% em Python, sem C-extensions
-httpx==0.27.2
-requests==2.32.3
-beautifulsoup4==4.12.3
-
-# Opcional (templates PDF)
-jinja2==3.1.4
+fastapi
+uvicorn[standard]
+SQLAlchemy
+python-multipart
+passlib[bcrypt]
+python-jose
+reportlab
