@@ -142,13 +142,15 @@ def version():
 # -----------------------------------------------------------------------------
 # Auth
 # -----------------------------------------------------------------------------
+from typing import Optional
+from fastapi import Request
+
 @app.post("/api/login", response_model=LoginResp)
 def login(
     req: LoginReq,
     db: Session = Depends(get_db),
     request: Optional[Request] = None,
 ) -> LoginResp:
-    ...
     user = db.query(User).filter(User.email == req.email).first()
     if not user or not verify_pw(req.password, user.password):
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
@@ -165,9 +167,8 @@ def auth_login(
     db: Session = Depends(get_db),
     request: Optional[Request] = None,
 ) -> LoginResp:
-    ...
+    # reusa a mesma lógica do login principal
     return login(req=payload, db=db, request=request)
-
 
 # -----------------------------------------------------------------------------
 # Core: Risk Check
