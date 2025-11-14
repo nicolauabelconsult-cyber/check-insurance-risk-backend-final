@@ -1,40 +1,60 @@
+# main.py
 import os
-import time
-import datetime as dt
-from typing import Optional, List
+import csv
+import json
+import difflib
+from typing import List, Optional, Tuple
 
 from fastapi import (
     FastAPI,
     Depends,
     HTTPException,
+    status,
     UploadFile,
     File,
     Form,
     Query,
-    Header,
     Request,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
-from database import Base, engine, SessionLocal
-from models import User, RiskRecord, InfoSource
-from auth import create_token, decode_token, hash_pw, verify_pw
-from schemas import LoginReq, LoginResp, RiskCheckReq
-from utils import ensure_dir, render_pdf
-from security import SecurityHeadersMiddleware
-from audit import log, list_logs
-from ai_pipeline import build_facts_from_sources, rebuild_watchlist, is_pep_name
-from extractors import run_extractor
+from database import Base, engine
+from models import User, InfoSource, NormalizedEntity, RiskRecord, AuditLog
+from schemas import (
+    LoginRequest,
+    LoginResponse,
+    UserCreate,
+    UserRead,
+    RiskCheckRequest,
+    RiskCheckResponse,
+    Match,
+    RiskFactor,
+    RiskHistoryItem,
+    InfoSourceRead,
+    AuditLogRead,
+)
+from security import (
+    get_db,
+    hash_password,
+    verify_password,
+    create_access_token,
+    get_current_user,
+    get_current_admin,
+)
+from reporting import build_risk_report_pdf
+from utils import ensure_dir
 
-# -----------------------------------------------------------------------------
-# App & Middleware
-# -----------------------------------------------------------------------------
-app = FastAPI(title="Check Insurance Risk Backend", version="3.0.0")
-app.add_middleware(SecurityHeadersMiddleware)
 
-# CORS
+# Criar tabelas
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="Check Insurance Risk Backend", version="1.0.0")
+
+
+# ---------------------- CORS ----------------------
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
 app.add_middleware(
@@ -45,259 +65,510 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------------------------------------------------------
-# DB dependency
-# -----------------------------------------------------------------------------
-def get_db():
-    db = SessionLocal()
+
+# ---------------------- Utilidades ----------------------
+
+def log_event(
+    db: Session,
+    action: str,
+    user: Optional[User] = None,
+    details: Optional[str] = None,
+    ip_address: Optional[str] = None,
+) -> None:
+    log = AuditLog(
+        user_id=user.id if user else None,
+        username=user.username if user else None,
+        action=action,
+        details=details,
+        ip_address=ip_address,
+    )
+    db.add(log)
+    db.commit()
+
+
+@app.on_event("startup")
+def create_initial_admin():
+    """
+    Cria um utilizador admin inicial (username=admin / password=admin123)
+    se ainda não existir. Depois podes alterar pelo módulo de utilizadores.
+    """
+    db = Session(bind=engine)
     try:
-        yield db
+        existing = db.query(User).filter(User.username == "admin").first()
+        if not existing:
+            user = User(
+                username="admin",
+                full_name="Administrador",
+                password_hash=hash_password("admin123"),
+                is_admin=True,
+                is_active=True,
+            )
+            db.add(user)
+            db.commit()
     finally:
         db.close()
 
 
-# -----------------------------------------------------------------------------
-# Auth helpers (sem usar Depends(Request))
-# -----------------------------------------------------------------------------
-def _get_token_from_header(authorization: Optional[str]) -> str:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    parts = authorization.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Invalid Authorization header")
-    return parts[1]
-
-
-def _get_user_by_id(db: Session, user_id: int) -> User:
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return user
-
-
-def get_current_user(
-    authorization: Optional[str] = Header(None),
-    db: Session = Depends(get_db),
-) -> User:
-    """
-    Dependency que obtém o utilizador atual com base no token JWT.
-    NOTA: aqui NÃO usamos Request com Depends, apenas Header e DB.
-    """
-    token = _get_token_from_header(authorization)
-    payload = decode_token(token)
-    user_id = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
-    return _get_user_by_id(db, user_id)
-
-
-# -----------------------------------------------------------------------------
-# Startup
-# -----------------------------------------------------------------------------
-@app.on_event("startup")
-def on_startup():
-    Base.metadata.create_all(bind=engine)
-    ensure_dir("data/uploads")
-    ensure_dir("data/reports")
-
-
-# -----------------------------------------------------------------------------
-# Healthcheck
-# -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"status": "ok", "timestamp": dt.datetime.utcnow().isoformat() + "Z"}
+    return {"status": "ok"}
 
 
-# -----------------------------------------------------------------------------
-# Auth endpoints
-# -----------------------------------------------------------------------------
-@app.post("/auth/register", response_model=LoginResp)
-def register(
-    req: LoginReq,
+# ---------------------- Auth ----------------------
+
+@app.post("/auth/login", response_model=LoginResponse)
+def login(
+    payload: LoginRequest,
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
-    existing = db.query(User).filter(User.username == req.username).first()
+    user = db.query(User).filter(User.username == payload.username).first()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciais inválidas")
+
+    token = create_access_token({"sub": user.id})
+    ip = request.client.host if request and request.client else None
+    log_event(db, "login", user=user, details="Login bem sucedido", ip_address=ip)
+    return LoginResponse(access_token=token)
+
+
+@app.get("/auth/me", response_model=UserRead)
+def me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+# ---------------------- Gestão de utilizadores (Admin) ----------------------
+
+@app.post("/admin/users", response_model=UserRead)
+def create_user(
+    payload: UserCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+    request: Request = None,
+):
+    existing = db.query(User).filter(User.username == payload.username).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Username already exists")
+        raise HTTPException(status_code=400, detail="Username já existe")
 
     user = User(
-        username=req.username,
-        password_hash=hash_pw(req.password),
-        is_admin=req.is_admin or False,
+        username=payload.username,
+        full_name=payload.full_name,
+        password_hash=hash_password(payload.password),
+        is_admin=payload.is_admin,
+        is_active=True,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-
-    token = create_token({"sub": user.id, "username": user.username})
-    log(db, actor=user.username, action="user_register", details=f"User {user.username} created")
-    return LoginResp(access_token=token, token_type="bearer")
-
-
-@app.post("/auth/login", response_model=LoginResp)
-def login(req: LoginReq, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == req.username).first()
-    if not user or not verify_pw(req.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    token = create_token({"sub": user.id, "username": user.username})
-    log(db, actor=user.username, action="user_login", details="Successful login")
-    return LoginResp(access_token=token, token_type="bearer")
+    ip = request.client.host if request and request.client else None
+    log_event(db, "create_user", user=admin, details=f"Criou user {user.username}", ip_address=ip)
+    return user
 
 
-@app.get("/auth/me")
-def me(current_user: User = Depends(get_current_user)):
-    return {
-        "id": current_user.id,
-        "username": current_user.username,
-        "is_admin": current_user.is_admin,
-    }
+@app.get("/admin/users", response_model=List[UserRead])
+def list_users(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    return db.query(User).order_by(User.created_at.desc()).all()
 
 
-# -----------------------------------------------------------------------------
-# InfoSource (fontes de informação)
-# -----------------------------------------------------------------------------
-@app.post("/infosources/upload")
+@app.patch("/admin/users/{user_id}/status", response_model=UserRead)
+def update_user_status(
+    user_id: int,
+    is_active: bool = Query(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+    request: Request = None,
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilizador não encontrado")
+
+    user.is_active = is_active
+    db.commit()
+    db.refresh(user)
+    ip = request.client.host if request and request.client else None
+    log_event(
+        db,
+        "update_user_status",
+        user=admin,
+        details=f"Alterou estado de {user.username} para is_active={is_active}",
+        ip_address=ip,
+    )
+    return user
+
+
+@app.patch("/admin/users/{user_id}/password", response_model=UserRead)
+def reset_user_password(
+    user_id: int,
+    new_password: str = Form(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+    request: Request = None,
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilizador não encontrado")
+
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    db.refresh(user)
+    ip = request.client.host if request and request.client else None
+    log_event(
+        db,
+        "reset_user_password",
+        user=admin,
+        details=f"Reset password de {user.username}",
+        ip_address=ip,
+    )
+    return user
+
+
+# ---------------------- Upload e gestão de fontes ----------------------
+
+UPLOAD_DIR = "data/uploads"
+ensure_dir(UPLOAD_DIR)
+
+
+def guess_mapping(headers: List[str]) -> dict:
+    """
+    Faz uma tentativa simples de mapear colunas por nome.
+    Podes sempre enviar mapping_json explícito no upload.
+    """
+    lower_headers = {h.lower(): h for h in headers}
+    mapping = {}
+
+    # Nome
+    for key in ["nome", "name", "full_name", "nome_completo"]:
+        if key in lower_headers:
+            mapping["name"] = lower_headers[key]
+            break
+
+    # NIF
+    for key in ["nif", "nif_cliente", "tax_id"]:
+        if key in lower_headers:
+            mapping["nif"] = lower_headers[key]
+            break
+
+    # Passaporte
+    for key in ["passaporte", "passport"]:
+        if key in lower_headers:
+            mapping["passport"] = lower_headers[key]
+            break
+
+    # Cartão de residente
+    for key in ["cartao_residente", "residence_card", "cartao_residencia"]:
+        if key in lower_headers:
+            mapping["residence_card"] = lower_headers[key]
+            break
+
+    # Cargo / função
+    for key in ["cargo", "funcao", "role", "position"]:
+        if key in lower_headers:
+            mapping["role"] = lower_headers[key]
+            break
+
+    # País
+    for key in ["pais", "country"]:
+        if key in lower_headers:
+            mapping["country"] = lower_headers[key]
+            break
+
+    return mapping
+
+
+@app.post("/infosources/upload", response_model=InfoSourceRead)
 async def upload_infosource(
     name: str = Form(...),
+    source_type: str = Form(...),  # PEP, SANCTIONS, FRAUD, CLAIMS, OTHER
     description: str = Form(""),
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    mapping_json: Optional[str] = Form(None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    request: Request = None,
 ):
-    upload_dir = "data/uploads"
-    ensure_dir(upload_dir)
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Apenas ficheiros CSV são suportados nesta versão.")
 
-    ts = int(time.time())
-    filename = f"{ts}_{file.filename}"
-    filepath = os.path.join(upload_dir, filename)
+    # Guardar ficheiro
+    ensure_dir(UPLOAD_DIR)
+    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
 
-    with open(filepath, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    # Ler cabeçalho e linhas
+    with open(file_path, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames or []
+        if not headers:
+            raise HTTPException(status_code=400, detail="CSV sem cabeçalho.")
 
-    # extrair registos (IA / extractors)
-    num_records = run_extractor(filepath, db=db)
+        # Determinar mapping
+        if mapping_json:
+            mapping = json.loads(mapping_json)
+        else:
+            mapping = guess_mapping(headers)
 
-    src = InfoSource(
-        name=name,
-        description=description,
-        file_path=filepath,
-        num_records=num_records,
-        uploaded_by_id=current_user.id,
-    )
-    db.add(src)
-    db.commit()
-    db.refresh(src)
+        if "name" not in mapping:
+            raise HTTPException(
+                status_code=400,
+                detail="Não foi possível identificar a coluna do nome. Envia mapping_json explícito.",
+            )
 
-    # reconstruir factos em memória
-    build_facts_from_sources(db)
+        # Criar InfoSource
+        src = InfoSource(
+            name=name,
+            source_type=source_type.upper(),
+            description=description,
+            file_path=file_path,
+            uploaded_by_id=current_user.id,
+        )
+        db.add(src)
+        db.commit()
+        db.refresh(src)
 
-    log(
+        # Inserir NormalizedEntity
+        num_records = 0
+        for row in reader:
+            person_name = row.get(mapping.get("name", ""), "") or None
+            person_nif = row.get(mapping.get("nif", ""), "") or None if mapping.get("nif") else None
+            person_passport = row.get(mapping.get("passport", ""), "") or None if mapping.get("passport") else None
+            residence_card = row.get(mapping.get("residence_card", ""), "") or None if mapping.get("residence_card") else None
+            role = row.get(mapping.get("role", ""), "") or None if mapping.get("role") else None
+            country = row.get(mapping.get("country", ""), "") or None if mapping.get("country") else None
+
+            if not any([person_name, person_nif, person_passport, residence_card]):
+                continue
+
+            entity = NormalizedEntity(
+                source_id=src.id,
+                person_name=person_name,
+                person_nif=person_nif,
+                person_passport=person_passport,
+                residence_card=residence_card,
+                role=role,
+                country=country,
+                raw_payload=row,
+            )
+            db.add(entity)
+            num_records += 1
+
+        src.num_records = num_records
+        db.commit()
+        db.refresh(src)
+
+    ip = request.client.host if request and request.client else None
+    log_event(
         db,
-        actor=current_user.username,
-        action="infosource_upload",
-        details=f"Uploaded source {src.id} ({name}), records={num_records}",
+        "upload_infosource",
+        user=current_user,
+        details=f"Fonte {src.name} ({src.source_type}) com {src.num_records} registos",
+        ip_address=ip,
     )
 
-    return {"id": src.id, "name": src.name, "num_records": src.num_records}
+    return src
 
 
-@app.get("/infosources", response_model=List[dict])
+@app.get("/infosources", response_model=List[InfoSourceRead])
 def list_infosources(
-    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    sources = db.query(InfoSource).order_by(InfoSource.created_at.desc()).all()
-    return [
-        {
-            "id": s.id,
-            "name": s.name,
-            "description": s.description,
-            "num_records": s.num_records,
-            "created_at": s.created_at.isoformat(),
-        }
-        for s in sources
-    ]
+    return db.query(InfoSource).order_by(InfoSource.created_at.desc()).all()
 
 
-# -----------------------------------------------------------------------------
-# Consulta de risco / relatório
-# -----------------------------------------------------------------------------
-@app.post("/risk/check")
+# ---------------------- Lógica de matching e risco ----------------------
+
+def find_matches(
+    db: Session,
+    req: RiskCheckRequest,
+) -> List[Match]:
+    """
+    Procura matches nas entidades normalizadas,
+    usando NIF, passaporte, cartão e nome.
+    """
+    matches: List[Match] = []
+
+    q = db.query(NormalizedEntity, InfoSource).join(InfoSource, NormalizedEntity.source_id == InfoSource.id)
+
+    # Se tiver NIF, tentamos primeiro por NIF
+    if req.nif:
+        candidates = (
+            q.filter(func.lower(NormalizedEntity.person_nif) == req.nif.lower())
+            .limit(100)
+            .all()
+        )
+    elif req.passport:
+        candidates = (
+            q.filter(func.lower(NormalizedEntity.person_passport) == req.passport.lower())
+            .limit(100)
+            .all()
+        )
+    elif req.residence_card:
+        candidates = (
+            q.filter(func.lower(NormalizedEntity.residence_card) == req.residence_card.lower())
+            .limit(100)
+            .all()
+        )
+    else:
+        # Pesquisa por nome aproximado
+        name = req.full_name.strip().upper()
+        candidates = (
+            q.filter(func.upper(NormalizedEntity.person_name).like(f"%{name}%"))
+            .limit(100)
+            .all()
+        )
+
+    def sim(a: str, b: str) -> float:
+        return difflib.SequenceMatcher(None, (a or "").upper(), (b or "").upper()).ratio()
+
+    for entity, src in candidates:
+        similarity = sim(req.full_name, entity.person_name or "")
+        # Se estivermos por NIF/passaporte, aceitamos tudo; se for só nome, impomos threshold
+        if not any([req.nif, req.passport, req.residence_card]) and similarity < 0.6:
+            continue
+
+        identifier = entity.person_nif or entity.person_passport or entity.residence_card or None
+
+        matches.append(
+            Match(
+                source_id=src.id,
+                source_name=src.name,
+                source_type=src.source_type,
+                match_name=entity.person_name or "",
+                match_identifier=identifier,
+                similarity=similarity,
+                details={
+                    "role": entity.role,
+                    "country": entity.country,
+                },
+            )
+        )
+
+    return matches
+
+
+def compute_risk_from_matches(
+    req: RiskCheckRequest,
+    matches: List[Match],
+) -> Tuple[int, str, bool, bool, List[RiskFactor]]:
+    factors: List[RiskFactor] = []
+    score = 0
+    is_pep = False
+    has_sanctions = False
+
+    # Regras baseadas nas fontes
+    for m in matches:
+        st = (m.source_type or "").upper()
+        if st == "PEP":
+            is_pep = True
+            factors.append(RiskFactor(code="PEP", description="Presença em lista PEP", weight=70))
+            score += 70
+        elif st == "SANCTIONS":
+            has_sanctions = True
+            factors.append(RiskFactor(code="SANCTIONS", description="Presença em lista de sanções", weight=100))
+            score += 100
+        elif st == "FRAUD":
+            factors.append(RiskFactor(code="FRAUD", description="Registo em base interna de fraude", weight=60))
+            score += 60
+        elif st == "CLAIMS":
+            factors.append(RiskFactor(code="CLAIMS", description="Histórico de sinistros relevante", weight=30))
+            score += 30
+
+    # Penalização leve se não houver NIF
+    if not req.nif:
+        factors.append(RiskFactor(code="NO_NIF", description="NIF não fornecido", weight=10))
+        score += 10
+
+    # Se não há matches negativos e há identificação completa, risco baixo
+    if score == 0 and req.nif:
+        factors.append(RiskFactor(code="CLEAN", description="Sem ocorrências negativas nas fontes", weight=0))
+
+    # Normalizar score (0-100)
+    score = max(0, min(score, 100))
+
+    if score <= 30:
+        level = "LOW"
+    elif score <= 60:
+        level = "MEDIUM"
+    elif score <= 85:
+        level = "HIGH"
+    else:
+        level = "CRITICAL"
+
+    return score, level, is_pep, has_sanctions, factors
+
+
+# ---------------------- Análise de risco ----------------------
+
+@app.post("/risk/check", response_model=RiskCheckResponse)
 def risk_check(
-    req: RiskCheckReq,
-    generate_pdf: bool = Query(False),
-    current_user: User = Depends(get_current_user),
+    payload: RiskCheckRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    request: Request = None,
 ):
-    """
-    Endpoint principal chamado pelo frontend ao clicar em 'Analisar Risco'.
-    Pode, opcionalmente, devolver um PDF do relatório.
-    """
+    if not any([payload.full_name, payload.nif, payload.passport, payload.residence_card]):
+        raise HTTPException(status_code=400, detail="Fornece pelo menos um identificador (nome, NIF, passaporte ou cartão).")
 
-    # Chama a pequena IA / motor de matching
-    matches = build_facts_from_sources(db, query=req)  # assumindo que aceita RiskCheckReq
-    pep_flag = any(is_pep_name(m["name"]) for m in matches)
-
-    risk_score = 0
-    if pep_flag:
-        risk_score += 70
-    risk_score += min(len(matches) * 5, 30)
+    matches = find_matches(db, payload)
+    score, level, is_pep, has_sanctions, factors = compute_risk_from_matches(payload, matches)
 
     record = RiskRecord(
+        full_name=payload.full_name,
+        nif=payload.nif,
+        passport=payload.passport,
+        residence_card=payload.residence_card,
+        risk_score=score,
+        risk_level=level,
+        is_pep=is_pep,
+        has_sanctions=has_sanctions,
+        matches_json=json.dumps([m.dict() for m in matches], ensure_ascii=False),
+        factors_json=json.dumps([f.dict() for f in factors], ensure_ascii=False),
+        decision=None,
+        analyst_notes=payload.extra_info or "",
         analyst_id=current_user.id,
-        full_name=req.full_name,
-        nif=req.nif,
-        passport=req.passport,
-        residence_card=req.residence_card,
-        risk_score=risk_score,
-        is_pep=pep_flag,
-        raw_matches=matches,
     )
     db.add(record)
     db.commit()
     db.refresh(record)
 
-    log(
+    ip = request.client.host if request and request.client else None
+    log_event(
         db,
-        actor=current_user.username,
-        action="risk_check",
-        details=f"Risk check {record.id} for {record.full_name} (score={risk_score})",
+        "risk_check",
+        user=current_user,
+        details=f"RiskRecord {record.id} para {record.full_name} (score={record.risk_score})",
+        ip_address=ip,
     )
 
-    summary = {
-        "id": record.id,
-        "full_name": record.full_name,
-        "nif": record.nif,
-        "risk_score": record.risk_score,
-        "is_pep": record.is_pep,
-        "matches": matches,
-        "created_at": record.created_at.isoformat(),
-    }
-
-    if not generate_pdf:
-        return summary
-
-    # gerar PDF
-    pdf_path = render_pdf(record, matches)
-    pdf_file = open(pdf_path, "rb")
-
-    filename = f"relatorio_risco_{record.id}.pdf"
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-
-    return StreamingResponse(pdf_file, media_type="application/pdf", headers=headers)
+    return RiskCheckResponse(
+        id=record.id,
+        full_name=record.full_name,
+        nif=record.nif,
+        passport=record.passport,
+        residence_card=record.residence_card,
+        risk_score=record.risk_score,
+        risk_level=record.risk_level,
+        is_pep=record.is_pep,
+        has_sanctions=record.has_sanctions,
+        matches=matches,
+        factors=factors,
+        decision=record.decision,
+        analyst_notes=record.analyst_notes,
+        created_at=record.created_at,
+    )
 
 
-# -----------------------------------------------------------------------------
-# Dashboard / histórico
-# -----------------------------------------------------------------------------
-@app.get("/risk/history")
+# ---------------------- Histórico ----------------------
+
+@app.get("/risk/history", response_model=List[RiskHistoryItem])
 def risk_history(
     limit: int = Query(50, ge=1, le=500),
-    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     qs = (
         db.query(RiskRecord)
@@ -305,72 +576,71 @@ def risk_history(
         .limit(limit)
         .all()
     )
-    return [
-        {
-            "id": r.id,
-            "full_name": r.full_name,
-            "nif": r.nif,
-            "risk_score": r.risk_score,
-            "is_pep": r.is_pep,
-            "created_at": r.created_at.isoformat(),
-        }
-        for r in qs
-    ]
+
+    resp: List[RiskHistoryItem] = []
+    for r in qs:
+        resp.append(
+            RiskHistoryItem(
+                id=r.id,
+                full_name=r.full_name,
+                nif=r.nif,
+                risk_score=r.risk_score,
+                risk_level=r.risk_level,
+                is_pep=r.is_pep,
+                has_sanctions=r.has_sanctions,
+                created_at=r.created_at,
+            )
+        )
+    return resp
 
 
-# -----------------------------------------------------------------------------
-# Admin: logs & watchlist
-# -----------------------------------------------------------------------------
-@app.get("/admin/logs")
-def get_logs(
-    current_user: User = Depends(get_current_user),
+# ---------------------- PDF do relatório ----------------------
+
+BASE_APP_URL = os.getenv("BASE_APP_URL", "https://teu-front.netlify.app")
+
+
+@app.get("/risk/{record_id}/report.pdf")
+def download_risk_report(
+    record_id: int,
     db: Session = Depends(get_db),
-):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    entries = list_logs(db)
-    return entries
-
-
-@app.post("/admin/rebuild-watchlist")
-def admin_rebuild_watchlist(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    request: Request = None,
 ):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin only")
+    # Garantir que o registo existe e pertence ao sistema
+    record = db.query(RiskRecord).filter(RiskRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Registo de risco não encontrado")
 
-    rebuild_watchlist(db)
-    log(
+    pdf_path = build_risk_report_pdf(db, record_id, BASE_APP_URL)
+
+    ip = request.client.host if request and request.client else None
+    log_event(
         db,
-        actor=current_user.username,
-        action="rebuild_watchlist",
-        details="Manual rebuild of watchlist",
+        "download_report",
+        user=current_user,
+        details=f"Download de relatório PDF para RiskRecord {record_id}",
+        ip_address=ip,
     )
-    return {"status": "ok"}
 
-
-# -----------------------------------------------------------------------------
-# Handler para erros genéricos
-# -----------------------------------------------------------------------------
-@app.exception_handler(Exception)
-async def generic_exception_handler(request: Request, exc: Exception):
-    # aqui usamos Request normalmente, SEM Depends
-    # podes personalizar o log conforme a tua tabela de auditoria
-    try:
-        db = SessionLocal()
-        log(db, actor="system", action="error", details=str(exc))
-    except Exception:
-        # evitar que um erro no log cause outro erro
-        pass
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass
-
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error"},
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=f"relatorio_risco_{record_id}.pdf",
     )
+
+
+# ---------------------- Logs / Auditoria ----------------------
+
+@app.get("/admin/logs", response_model=List[AuditLogRead])
+def get_logs(
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    logs = (
+        db.query(AuditLog)
+        .order_by(AuditLog.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    return logs
