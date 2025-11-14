@@ -1,7 +1,7 @@
 # reporting.py
 import os
 import json
-from typing import List
+from typing import List, Optional
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -37,6 +37,12 @@ def build_risk_report_pdf(db: Session, record_id: int, base_app_url: str) -> str
 
     matches = json.loads(record.matches_json)
     factors = json.loads(record.factors_json)
+    primary_match: Optional[dict] = None
+    if record.primary_match_json:
+        try:
+            primary_match = json.loads(record.primary_match_json)
+        except Exception:
+            primary_match = None
 
     file_path = os.path.join(REPORTS_DIR, f"risk_report_{record.id}.pdf")
 
@@ -149,8 +155,27 @@ def build_risk_report_pdf(db: Session, record_id: int, base_app_url: str) -> str
 
     elements.append(Spacer(1, 0.8 * cm))
 
+    # --- Match principal (se existir) ---
+    elements.append(Paragraph("3. Entidade principal analisada", styles["SectionTitle"]))
+    if primary_match:
+        pm = primary_match
+        elements.append(
+            Paragraph(
+                f"<b>{pm.get('match_name', '')}</b> — {pm.get('source_name', '')} "
+                f"({pm.get('source_type', '')}), identificador: "
+                f"{pm.get('match_identifier') or '-'}",
+                styles["Normal"],
+            )
+        )
+    else:
+        elements.append(
+            Paragraph("Nenhum match principal foi seleccionado; análise baseada em todos os registos encontrados.", styles["Normal"])
+        )
+
+    elements.append(Spacer(1, 0.5 * cm))
+
     # --- Detalhe dos matches ---
-    elements.append(Paragraph("3. Registos encontrados nas fontes", styles["SectionTitle"]))
+    elements.append(Paragraph("4. Registos encontrados nas fontes", styles["SectionTitle"]))
 
     if matches:
         matches_table_data = [
@@ -187,7 +212,7 @@ def build_risk_report_pdf(db: Session, record_id: int, base_app_url: str) -> str
     elements.append(Spacer(1, 0.8 * cm))
 
     # --- Rodapé / nota legal ---
-    elements.append(Paragraph("4. Nota de enquadramento", styles["SectionTitle"]))
+    elements.append(Paragraph("5. Nota de enquadramento", styles["SectionTitle"]))
     elements.append(
         Paragraph(
             "Este relatório foi gerado automaticamente pelo sistema Check Insurance Risk "
