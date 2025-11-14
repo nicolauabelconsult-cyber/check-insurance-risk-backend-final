@@ -2,6 +2,6 @@ fastapi
 uvicorn[standard]
 SQLAlchemy
 python-multipart
-passlib[bcrypt]
+passlib
 python-jose
 reportlab
