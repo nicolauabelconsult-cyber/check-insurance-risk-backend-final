@@ -144,8 +144,11 @@ def version():
 # -----------------------------------------------------------------------------
 @app.post("/api/login", response_model=LoginResp)
 def login(
-    req: LoginReq, db: Session = Depends(get_db), request: Request | None = None
+    req: LoginReq,
+    db: Session = Depends(get_db),
+    request: Optional[Request] = None,
 ) -> LoginResp:
+    ...
     user = db.query(User).filter(User.email == req.email).first()
     if not user or not verify_pw(req.password, user.password):
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
@@ -158,8 +161,11 @@ def login(
 
 @app.post("/api/auth/login", response_model=LoginResp)
 def auth_login(
-    payload: LoginReq, db: Session = Depends(get_db), request: Request | None = None
+    payload: LoginReq,
+    db: Session = Depends(get_db),
+    request: Optional[Request] = None,
 ) -> LoginResp:
+    ...
     return login(req=payload, db=db, request=request)
 
 
