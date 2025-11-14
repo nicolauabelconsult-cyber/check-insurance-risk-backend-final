@@ -298,7 +298,7 @@ def admin_user_add(
 # -----------------------------------------------------------------------------
 # Admin: Risk Data
 # -----------------------------------------------------------------------------
-@app.post(\"/api/admin/risk-data/add-record\")
+@app.post("/api/admin/risk-data/add-record")
 def admin_risk_add_record(
     id: str = Form(None),
     nome: str = Form(None),
@@ -308,12 +308,12 @@ def admin_risk_add_record(
     cartao_residente: str = Form(None),
     score_final: int = Form(0),
     justificacao: str = Form(None),
-    pep_alert: str = Form(\"0\"),
-    sanctions_alert: str = Form(\"0\"),
+    pep_alert: str = Form("0"),
+    sanctions_alert: str = Form("0"),
     historico_pagamentos: str = Form(None),
     sinistros_total: int = Form(0),
     sinistros_ult_12m: int = Form(0),
-    fraude_suspeita: str = Form(\"0\"),
+    fraude_suspeita: str = Form("0"),
     comentario_fraude: str = Form(None),
     esg_score: int = Form(0),
     country_risk: str = Form(None),
@@ -322,18 +322,17 @@ def admin_risk_add_record(
     payload: dict = Depends(bearer),
     db: Session = Depends(get_db),
 ):
-    if payload.get(\"role\") != \"admin\":
-        raise HTTPException(status_code=403, detail=\"Apenas administradores\")
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Apenas administradores")
 
-
-    pep_bool = (str(pep_alert).lower() in (\"1\", \"true\", \"yes\", \"sim\"))
-    sanc_bool = (str(sanctions_alert).lower() in (\"1\", \"true\", \"yes\", \"sim\"))
-    fraude_bool = (str(fraude_suspeita).lower() in (\"1\", \"true\", \"yes\", \"sim\"))
+    pep_bool = str(pep_alert).lower() in ("1", "true", "yes", "sim")
+    sanc_bool = str(sanctions_alert).lower() in ("1", "true", "yes", "sim")
+    fraude_bool = str(fraude_suspeita).lower() in ("1", "true", "yes", "sim")
 
     if id:
         rec = db.query(RiskRecord).filter(RiskRecord.id == int(id)).first()
         if not rec:
-            raise HTTPException(status_code=404, detail=\"Registo inexistente\")
+            raise HTTPException(status_code=404, detail="Registo inexistente")
     else:
         rec = RiskRecord()
 
@@ -362,41 +361,57 @@ def admin_risk_add_record(
     db.add(rec)
     db.commit()
     db.refresh(rec)
-    log(payload.get(\"sub\"), \"risk-save\", {\"id\": rec.id})
-    return {\"status\": \"saved\", \"id\": rec.id}
+    log(payload.get("sub"), "risk-save", {"id": rec.id})
+    return {"status": "saved", "id": rec.id}
 
-@app.get(\"/api/admin/risk-data/list\")
+
+@app.get("/api/admin/risk-data/list")
 def admin_risk_list(payload: dict = Depends(bearer), db: Session = Depends(get_db)):
-    if payload.get(\"role\") not in (\"admin\", \"auditor\"):
-        raise HTTPException(status_code=403, detail=\"Apenas administradores/auditores\")
+    if payload.get("role") not in ("admin", "auditor"):
+        raise HTTPException(status_code=403, detail="Apenas administradores/auditores")
+
     rows = db.query(RiskRecord).order_by(RiskRecord.id.desc()).all()
 
     def ser(r: RiskRecord):
         return {
-            \"id\": r.id,
-            \"nome\": r.nome,
-            \"nif\": r.nif,
-            \"bi\": r.bi,
-            \"passaporte\": r.passaporte,
-            \"cartao_residente\": r.cartao_residente,
-            \"score_final\": r.score_final,
-            \"justificacao\": r.justificacao,
-            \"pep_alert\": r.pep_alert,
-            \"sanctions_alert\": r.sanctions_alert,
-            \"historico_pagamentos\": r.historico_pagamentos,
-            \"sinistros_total\": r.sinistros_total,
-            \"sinistros_ult_12m\": r.sinistros_ult_12m,
-            \"fraude_suspeita\": r.fraude_suspeita,
-            \"comentario_fraude\": r.comentario_fraude,
-            \"esg_score\": r.esg_score,
-            \"country_risk\": r.country_risk,
-            \"credit_rating\": r.credit_rating,
-            \"kyc_confidence\": r.kyc_confidence,
+            "id": r.id,
+            "nome": r.nome,
+            "nif": r.nif,
+            "bi": r.bi,
+            "passaporte": r.passaporte,
+            "cartao_residente": r.cartao_residente,
+            "score_final": r.score_final,
+            "justificacao": r.justificacao,
+            "pep_alert": r.pep_alert,
+            "sanctions_alert": r.sanctions_alert,
+            "historico_pagamentos": r.historico_pagamentos,
+            "sinistros_total": r.sinistros_total,
+            "sinistros_ult_12m": r.sinistros_ult_12m,
+            "fraude_suspeita": r.fraude_suspeita,
+            "comentario_fraude": r.comentario_fraude,
+            "esg_score": r.esg_score,
+            "country_risk": r.country_risk,
+            "credit_rating": r.credit_rating,
+            "kyc_confidence": r.kyc_confidence,
         }
 
     return [ser(r) for r in rows]
 
-@app.post(\"/api/admin/risk-data/delete-record\")
-def admin_risk_delete(id: int = Form(...), payload: dict = Depends(bearer), db: Session = Depends(get_db)):
-    if payload.get(\"role\") != \"admin\":
-        raise HTTPException(status_code=403, detail=\"Apenas administradores\"
+
+@app.post("/api/admin/risk-data/delete-record")
+def admin_risk_delete(
+    id: int = Form(...),
+    payload: dict = Depends(bearer),
+    db: Session = Depends(get_db),
+):
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Apenas administradores")
+
+    rec = db.query(RiskRecord).filter(RiskRecord.id == id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Registo inexistente")
+
+    db.delete(rec)
+    db.commit()
+    log(payload.get("sub"), "risk-delete", {"id": id})
+    return {"status": "deleted"}
