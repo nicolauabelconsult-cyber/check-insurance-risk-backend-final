@@ -1,10 +1,18 @@
+# database.py
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DB_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-connect_args = {"check_same_thread": False} if DB_URL.startswith("sqlite") else {}
+# Para começar, usamos SQLite local.
+# No futuro podes trocar por Postgres alterando esta URL.
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./check_insurance_risk.db")
 
-engine = create_engine(DB_URL, echo=False, future=True, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 Base = declarative_base()
