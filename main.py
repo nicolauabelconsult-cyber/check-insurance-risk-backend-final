@@ -1,7 +1,7 @@
 import os
 import time
 import datetime as dt
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from fastapi import (
     FastAPI,
@@ -40,6 +40,7 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
 ]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS
@@ -106,7 +107,7 @@ with SessionLocal() as s:
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-def bearer(authorization: Optional[str] = Header(default=None)) -> dict:
+def bearer(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Cabeçalho Authorization inválido")
     token = authorization.split(" ", 1)[1]
@@ -118,6 +119,7 @@ def bearer(authorization: Optional[str] = Header(default=None)) -> dict:
 
 @app.exception_handler(Exception)
 async def default_handler(request: Request, exc: Exception):
+    # Log mínimo opcional – aqui podes ligar ao teu sistema de logs se quiseres
     return JSONResponse(status_code=500, content={"detail": "Erro interno"})
 
 
@@ -142,21 +144,21 @@ def version():
 # -----------------------------------------------------------------------------
 # Auth
 # -----------------------------------------------------------------------------
-from typing import Optional
-from fastapi import Request
-
 @app.post("/api/login", response_model=LoginResp)
 def login(
     req: LoginReq,
     db: Session = Depends(get_db),
-    request: Optional[Request] = None,
+    request: Request = Depends(),
 ) -> LoginResp:
+    """
+    Login principal usado pelo frontend (index.html, admin.html, etc.).
+    """
     user = db.query(User).filter(User.email == req.email).first()
     if not user or not verify_pw(req.password, user.password):
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
 
     token = create_token(sub=str(user.id), name=user.name, role=user.role)
-    ip = request.client.host if request else None
+    ip = request.client.host if request and request.client else None
     log(str(user.id), "login", {"email": user.email, "ip": ip})
     return LoginResp(access_token=token, user_name=user.name, role=user.role)
 
@@ -165,10 +167,14 @@ def login(
 def auth_login(
     payload: LoginReq,
     db: Session = Depends(get_db),
-    request: Optional[Request] = None,
+    request: Request = Depends(),
 ) -> LoginResp:
-    # reusa a mesma lógica do login principal
+    """
+    End-point alternativo /api/auth/login mantido para compatibilidade.
+    Reutiliza exactamente a mesma lógica do /api/login.
+    """
     return login(req=payload, db=db, request=request)
+
 
 # -----------------------------------------------------------------------------
 # Core: Risk Check
@@ -179,7 +185,11 @@ def risk_check(
     payload: dict = Depends(bearer),
     db: Session = Depends(get_db),
 ):
-    log(payload.get("sub"), "risk-check", {"identifier": req.identifier, "type": req.identifier_type})
+    log(
+        payload.get("sub"),
+        "risk-check",
+        {"identifier": req.identifier, "type": req.identifier_type},
+    )
 
     # 1) Dados internos (se existirem)
     rec = (
