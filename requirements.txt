@@ -4,3 +4,7 @@ SQLAlchemy
 python-multipart
 python-jose
 reportlab
+requests
+openpyxl
+beautifulsoup4
+pdfplumber
