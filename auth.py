@@ -1,38 +1,91 @@
 # auth.py
-"""
-Camada de compatibilidade para código antigo que faz 'import auth'.
-Reencaminha funções para o módulo security.
-"""
+import os
+from datetime import datetime, timedelta
 
-from datetime import timedelta
-from typing import Optional
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from sqlalchemy.orm import Session
 
-from jose import jwt
+from database import SessionLocal
+from models import User  # ajusta se o nome for diferente
 
-from security import (
-    SECRET_KEY,
-    ALGORITHM,
-    hash_password,
-    verify_password,
-    create_access_token,
-)
+# --------------------------------------------------------------------
+# CONFIG
+# --------------------------------------------------------------------
+SECRET_KEY = os.getenv("SECRET_KEY", "change-this-super-secret-key")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 8  # 8h
 
-
-def hash_pw(password: str) -> str:
-    """Compatível com código antigo: hash_pw -> hash_password."""
-    return hash_password(password)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
-def verify_pw(password: str, password_hash: str) -> bool:
-    """Compatível com código antigo: verify_pw -> verify_password."""
-    return verify_password(password, password_hash)
+def get_db():
+  db = SessionLocal()
+  try:
+    yield db
+  finally:
+    db.close()
 
 
-def create_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Compatível com código antigo: create_token -> create_access_token."""
-    return create_access_token(data, expires_delta)
+# --------------------------------------------------------------------
+# TOKEN HELPERS
+# --------------------------------------------------------------------
+def create_token(user: User) -> str:
+  """Cria um JWT com os dados mínimos do utilizador."""
+  expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+  payload = {
+    "sub": str(user.id),
+    "username": user.username,
+    "is_admin": user.is_admin,
+    "exp": expire,
+  }
+  token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+  return token
 
 
 def decode_token(token: str) -> dict:
-    """Decodifica um JWT usando a mesma chave/algoritmo do security."""
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+  """Valida e devolve o payload do token."""
+  try:
+    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    return payload
+  except JWTError:
+    raise HTTPException(
+      status_code=status.HTTP_401_UNAUTHORIZED,
+      detail="Token inválido ou não fornecido",
+      headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+# --------------------------------------------------------------------
+# DEPENDENCIES
+# --------------------------------------------------------------------
+def get_current_user(
+  token: str = Depends(oauth2_scheme),
+  db: Session = Depends(get_db),
+) -> User:
+  payload = decode_token(token)
+  user_id = payload.get("sub")
+  if user_id is None:
+    raise HTTPException(
+      status_code=status.HTTP_401_UNAUTHORIZED,
+      detail="Token inválido ou não fornecido",
+    )
+  user = db.query(User).get(int(user_id))
+  if not user or not user.is_active:
+    raise HTTPException(
+      status_code=status.HTTP_401_UNAUTHORIZED,
+      detail="Utilizador inválido ou inactivo",
+    )
+  return user
+
+
+def get_current_admin(
+  current_user: User = Depends(get_current_user),
+) -> User:
+  if not current_user.is_admin:
+    raise HTTPException(
+      status_code=status.HTTP_403_FORBIDDEN,
+      detail="Acesso reservado ao administrador",
+    )
+  return current_user
