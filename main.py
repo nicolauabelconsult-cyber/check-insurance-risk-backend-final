@@ -329,9 +329,7 @@ def index_tabular_file(
         first = True
         for row in ws.iter_rows(values_only=True):
             if first:
-                headers = [
-                    str(c).strip() if c is not None else "" for c in row
-                ]
+                headers = [str(c).strip() if c is not None else "" for c in row]
                 first = False
                 continue
             values = [str(c).strip() if c is not None else "" for c in row]
@@ -404,386 +402,142 @@ def index_tabular_file(
     return src.num_records
 
 
-# ---------------------- Extractores HTML / PDF ----------------------
+# -------- Extractores HTML / PDF (mantém como já tens) --------
+# (podes deixar exactamente as funções extract_entities_from_html_content,
+#  extract_entities_from_pdf_file e create_entities_from_extracted
+#  que já estão no teu ficheiro, sem alterar)
 
 
-def extract_entities_from_html_content(
-    html: str,
-    default_country: str = "Angola",
-) -> List[dict]:
-    """
-    Extrai entidades de uma página HTML (heurística simples).
-    Devolve lista de dicts com chaves: person_name, role, country.
-    """
-    try:
-        from bs4 import BeautifulSoup
-    except ImportError:
-        # Se BeautifulSoup não estiver instalado, não quebrar o backend
-        return []
+# ---------------------- Endpoint de upload de fontes ----------------------
 
-    soup = BeautifulSoup(html, "html.parser")
-    entities: List[dict] = []
-
-    # A) Tabelas com cabeçalhos
-    for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        if len(rows) < 2:
-            continue
-
-        header_cells = rows[0].find_all(["th", "td"])
-        headers = [(th.get_text(strip=True) or "").lower() for th in header_cells]
-        if not headers:
-            continue
-
-        for tr in rows[1:]:
-            cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-            if not cols or len(cols) != len(headers):
-                continue
-            row = dict(zip(headers, cols))
-
-            name = (
-                row.get("nome")
-                or row.get("name")
-                or row.get("titular")
-                or row.get("ministro")
-            )
-            if not name:
-                continue
-
-            role = (
-                row.get("cargo")
-                or row.get("funcao")
-                or row.get("função")
-                or row.get("role")
-                or row.get("posição")
-                or row.get("position")
-                or ""
-            )
-            country = (
-                row.get("pais")
-                or row.get("país")
-                or row.get("country")
-                or default_country
-            )
-
-            entities.append(
-                {
-                    "person_name": name.strip(),
-                    "role": role.strip(),
-                    "country": country.strip(),
-                }
-            )
-
-    # B) Listas simples (ul/li) – ex: "Nome – Ministro de X"
-    for li in soup.find_all("li"):
-        text = li.get_text(" ", strip=True)
-        lower = text.lower()
-        if len(text.split()) < 2:
-            continue
-
-        if "ministro" in lower or "secretário" in lower or "governador" in lower:
-            # tentar separar em "Nome – Cargo"
-            if "–" in text:
-                parts = [p.strip() for p in text.split("–", 1)]
-            elif "-" in text:
-                parts = [p.strip() for p in text.split("-", 1)]
-            else:
-                parts = [text]
-
-            name = parts[0]
-            cargo = parts[1] if len(parts) > 1 else ""
-
-            entities.append(
-                {
-                    "person_name": name,
-                    "role": cargo,
-                    "country": default_country,
-                }
-            )
-
-    # C) Blocos repetidos – heurística simples (divs grandes com "Ministro")
-    for div in soup.find_all("div"):
-        txt = div.get_text(" ", strip=True)
-        lower = txt.lower()
-        if "ministro" in lower or "secretário" in lower or "governador" in lower:
-            parts = txt.split()
-            if len(parts) >= 2:
-                name = " ".join(parts[0:3])
-                entities.append(
-                    {
-                        "person_name": name,
-                        "role": txt,
-                        "country": default_country,
-                    }
-                )
-
-    # remover duplicados simples por (person_name, role, country)
-    unique = {}
-    for e in entities:
-        key = (
-            (e.get("person_name") or "").upper(),
-            (e.get("role") or "").upper(),
-            (e.get("country") or "").upper(),
-        )
-        if key not in unique:
-            unique[key] = e
-
-    return list(unique.values())
-
-
-def extract_entities_from_pdf_file(
-    file_path: str,
-    default_country: str = "Angola",
-) -> List[dict]:
-    """
-    Extrai entidades de um PDF de forma heurística.
-    Tenta tabelas primeiro; se não houver, tenta texto corrido.
-    """
-    try:
-        import pdfplumber
-    except ImportError:
-        # Se pdfplumber não estiver instalado, não quebrar o backend
-        return []
-
-    entities: List[dict] = []
-
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                # 1) tentar tabelas
-                table = page.extract_table()
-                if table and len(table) > 1:
-                    headers = [(h or "").strip().lower() for h in table[0]]
-                    for row in table[1:]:
-                        if not any(row):
-                            continue
-                        record = {}
-                        for i in range(min(len(headers), len(row))):
-                            record[headers[i]] = (row[i] or "").strip()
-
-                        name = (
-                            record.get("nome")
-                            or record.get("name")
-                            or record.get("titular")
-                        )
-                        if not name:
-                            continue
-
-                        role = (
-                            record.get("cargo")
-                            or record.get("funcao")
-                            or record.get("função")
-                            or ""
-                        )
-                        country = (
-                            record.get("pais")
-                            or record.get("país")
-                            or record.get("country")
-                            or default_country
-                        )
-
-                        entities.append(
-                            {
-                                "person_name": name,
-                                "role": role,
-                                "country": country,
-                            }
-                        )
-
-                # 2) fallback: texto corrido – muito conservador
-                text = page.extract_text() or ""
-                lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-                for ln in lines:
-                    # Exemplo simples: linha com pelo menos 2 palavras e "Ministro"/"Secretário"
-                    lower = ln.lower()
-                    if (
-                        ("ministro" in lower or "secretário" in lower)
-                        and len(ln.split()) >= 2
-                    ):
-                        entities.append(
-                            {
-                                "person_name": ln.split(" ", 1)[0],
-                                "role": ln,
-                                "country": default_country,
-                            }
-                        )
-
-    except Exception:
-        # se algo correr mal na leitura do PDF, devolve o que tiver
-        pass
-
-    # remover duplicados simples
-    unique = {}
-    for e in entities:
-        key = (
-            (e.get("person_name") or "").upper(),
-            (e.get("role") or "").upper(),
-            (e.get("country") or "").upper(),
-        )
-        if key not in unique:
-            unique[key] = e
-
-    return list(unique.values())
-
-
-def create_entities_from_extracted(
-    db: Session,
-    src: InfoSource,
-    extracted: List[dict],
-) -> int:
-    """
-    Recebe lista de dicts com chaves (person_name, role, country, opcionalmente nif/passport)
-    e cria NormalizedEntity.
-    """
-    num_records = 0
-    for e in extracted:
-        name = (e.get("person_name") or "").strip()
-        if not name:
-            continue
-
-        entity = NormalizedEntity(
-            source_id=src.id,
-            person_name=name,
-            person_nif=(e.get("person_nif") or None),
-            person_passport=(e.get("person_passport") or None),
-            residence_card=(e.get("residence_card") or None),
-            role=(e.get("role") or None),
-            country=(e.get("country") or None),
-            raw_payload=e,
-        )
-        db.add(entity)
-        num_records += 1
-
-    src.num_records = (src.num_records or 0) + num_records
-    db.commit()
-    db.refresh(src)
-    return num_records
-
-
-# ---------------------- Endpoints de fontes ----------------------
-
-from urllib.parse import urlparse
-from fastapi import Body
-
-# ...
-
-@app.post("/infosources/from-url", response_model=InfoSourceRead)
-def create_info_source_from_url(
-    name: str = Body(...),
-    source_type: str = Body(...),
-    url: str = Body(...),
-    description: Optional[str] = Body(None),
-    mapping_json: Optional[dict] = Body(None),  # ignorado por agora
+@app.post("/infosources/upload", response_model=InfoSourceRead)
+async def upload_infosource(
+    name: str = Form(...),
+    source_type: str = Form(...),  # PEP, SANCTIONS, FRAUD, CLAIMS, OTHER
+    description: str = Form(""),
+    file: UploadFile = File(...),
+    mapping_json: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_user),
+    request: Request = None,
 ):
     """
-    VERSÃO ESTÁVEL (sem acesso externo):
-    - Valida que a URL é http/https
-    - Cria uma InfoSource com essa URL registada (sem tentar fazer download)
-    - NÃO rebenta o servidor, logo o front-end nunca vê 'Failed to fetch'.
+    Upload de fontes:
+      - CSV / Excel (.xls, .xlsx) → guardado + indexado para matching
+      - PDF → guardado + extraído (heurística) para matching
+      - HTML (.html / .htm) → guardado + extraído (heurística) para matching
     """
+    ext = os.path.splitext(file.filename)[1].lower()
 
-    # 1) validação básica da URL
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
+    # 🔴 PONTO A: formatos suportados
+    if ext not in [".csv", ".xls", ".xlsx", ".pdf", ".html", ".htm"]:
         raise HTTPException(
             status_code=400,
-            detail="URL inválida. Use http:// ou https://",
+            detail="Formato não suportado. Use ficheiros CSV, Excel, PDF ou HTML.",
         )
 
-    # 2) criar a fonte simples
+    ensure_dir(UPLOAD_DIR)
+    file_path = os.path.join(UPLOAD_DIR, file.filename)
+
+    # Guardar ficheiro
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+
+    # Criar registo da fonte
     src = InfoSource(
         name=name,
         source_type=source_type.upper(),
         description=description,
-        # se o teu modelo InfoSource tiver um campo 'remote_url', usa-o aqui:
-        # remote_url=url,
-        num_records=0,
+        file_path=file_path,
+        uploaded_by_id=current_user.id,
     )
     db.add(src)
     db.commit()
     db.refresh(src)
 
+    # 🔵 PONTO B: tratamento específico por tipo
+    if ext in [".csv", ".xls", ".xlsx"]:
+        # Tabelas → CSV / Excel
+        index_tabular_file(db, src, file_path, mapping_json, ext)
+
+    elif ext == ".pdf":
+        # PDF → extractor de PDF
+        extracted = extract_entities_from_pdf_file(file_path)
+        if extracted:
+            create_entities_from_extracted(db, src, extracted)
+        else:
+            src.num_records = src.num_records or 0
+            db.commit()
+            db.refresh(src)
+
+    elif ext in [".html", ".htm"]:
+        # HTML → ler ficheiro e usar extractor HTML
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                html = f.read()
+        except Exception:
+            html = ""
+
+        if html:
+            extracted = extract_entities_from_html_content(html)
+        else:
+            extracted = []
+
+        if extracted:
+            create_entities_from_extracted(db, src, extracted)
+        else:
+            src.num_records = src.num_records or 0
+            db.commit()
+            db.refresh(src)
+
+    ip = request.client.host if request and request.client else None
+    log_event(
+        db,
+        "upload_infosource",
+        user=current_user,
+        details=f"Fonte {src.name} ({src.source_type}) com {src.num_records} registos",
+        ip_address=ip,
+    )
+
     return src
 
-# -------------------------------------------------------
-#  FONTE A PARTIR DE URL (CSV / EXCEL / HTML / PDF)
-# -------------------------------------------------------
+
+# ---------------------- Fonte a partir de URL (meta-dados) ----------------------
+
 @app.post("/infosources/from-url", response_model=InfoSourceRead)
 def create_info_source_from_url(
     name: str = Body(...),
     source_type: str = Body(...),
     url: str = Body(...),
     description: Optional[str] = Body(None),
-    mapping_json: Optional[dict] = Body(None),
+    mapping_json: Optional[dict] = Body(None),  # compatibilidade com frontend
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
     """
-    Cria uma fonte de informação a partir de uma URL.
-    - CSV/Excel: preparado para tratar (usando mapping_json como no upload normal)
-    - HTML: por agora apenas faz download e guarda registo; parsing afinamos depois
-    - PDF: devolve erro controlado (ainda não suportado nesta versão)
-    NUNCA rebenta o servidor – em vez disso lança HTTPException com mensagem clara.
+    Regista uma fonte de informação a partir de uma URL.
+
+    NOTA:
+    - NÃO faz download nem parsing (para evitar timeouts/erros).
+    - Serve apenas para guardar meta-dados da origem.
+    - Para alimentar o motor de risco, usa 'Carregar fonte' com CSV/Excel/PDF/HTML.
     """
+    desc = description or f"Fonte registada a partir da URL: {url}"
 
-    # 1) Tentar fazer download da URL
-    try:
-        resp = requests.get(url, timeout=20)
-    except requests.RequestException as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Não foi possível aceder à URL: {e}",
-        )
-
-    if resp.status_code >= 400:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"URL respondeu com código {resp.status_code}",
-        )
-
-    content_type = resp.headers.get("content-type", "").lower()
-
-    # 2) Decidir tipo de tratamento básico
-    # CSV ou Excel (texto/csv, application/vnd.ms-excel, etc.)
-    if "text/csv" in content_type or "application/vnd.ms-excel" in content_type:
-        # Aqui podes reutilizar exactamente a mesma lógica que usas no /infosources/upload
-        # Para já, só vamos criar a InfoSource e deixar num estado 'sem registos'
-        num_records = 0  # depois podes incrementar quando fizeres parsing real
-    elif "html" in content_type:
-        # HTML: ainda não estamos a fazer parsing detalhado.
-        # Só vamos registar a fonte para não rebentar.
-        num_records = 0
-    elif "pdf" in content_type:
-        # PDF via URL ainda não suportado -> erro controlado (não crasha)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Leitura de PDF via URL ainda não está disponível nesta versão. "
-                   "Faça upload do PDF directamente na secção 'Carregar fonte'.",
-        )
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Tipo de conteúdo não suportado a partir da URL: {content_type}",
-        )
-
-    # 3) Criar registo InfoSource mínimo (sem parsing avançado)
     src = InfoSource(
         name=name,
         source_type=source_type.upper(),
-        description=description,
-        num_records=num_records,
-        # se tiveres campos como 'url' ou 'file_path', podes guardar aqui
+        description=desc,
+        num_records=0,
+        uploaded_by_id=current_user.id,
+        # se tiveres campo url no modelo, podes guardar aqui também
+        # url=url,
     )
     db.add(src)
     db.commit()
     db.refresh(src)
-
-    # TODO futuro: aqui chamamos um extractor específico para CSV/HTML
-    # que lê a resposta resp.content, cria NormalizedEntity, etc.
-
     return src
+
 
 @app.get("/infosources", response_model=List[InfoSourceRead])
 def list_infosources(
@@ -791,6 +545,7 @@ def list_infosources(
     current_user: User = Depends(get_current_user),
 ):
     return db.query(InfoSource).order_by(InfoSource.created_at.desc()).all()
+
 
 @app.patch("/infosources/{source_id}", response_model=InfoSourceRead)
 def update_infosource(
@@ -824,6 +579,7 @@ def update_infosource(
     )
 
     return src
+
 
 @app.delete("/infosources/{source_id}", status_code=204)
 def delete_infosource(
@@ -864,7 +620,6 @@ def delete_infosource(
     )
 
     return Response(status_code=204)
-
 
 # ---------------------- Lógica de matching e risco ----------------------
 
