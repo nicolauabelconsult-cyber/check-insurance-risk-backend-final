@@ -543,6 +543,46 @@ def delete_infosource(
 
     return Response(status_code=204)
 
+# ---------------------- Fonte a partir de URL ----------------------
+
+@app.post("/infosources/from-url", response_model=InfoSourceRead)
+def create_info_source_from_url(
+    name: str = Body(...),
+    source_type: str = Body(...),
+    url: str = Body(...),
+    description: Optional[str] = Body(None),
+    mapping_json: Optional[dict] = Body(None),  # reservado para uso futuro
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """
+    Regista uma fonte de informação a partir de uma URL.
+
+    Nesta versão:
+    - NÃO faz download nem parse do HTML/PDF.
+    - Apenas guarda meta-dados (nome, tipo, descrição, url) com num_records = 0.
+    - Para que a fonte seja usada no motor de risco tens de carregar
+      o ficheiro real em 'Carregar fonte' (CSV, Excel, PDF, HTML).
+    """
+
+    desc = description or f"Fonte registada a partir da URL: {url}"
+
+    src = InfoSource(
+        name=name,
+        source_type=source_type.upper(),
+        description=desc,
+        num_records=0,
+        # se o teu modelo tiver estes campos, podes descomentar:
+        # url=url,
+        # uploaded_by_id=current_user.id,
+    )
+
+    db.add(src)
+    db.commit()
+    db.refresh(src)
+    return src
+
+
 # ---------------------- Lógica de matching e risco ----------------------
 
 
