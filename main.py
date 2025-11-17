@@ -662,73 +662,50 @@ def create_entities_from_extracted(
 
 # ---------------------- Endpoints de fontes ----------------------
 
+from urllib.parse import urlparse
+from fastapi import Body
 
-@app.post("/infosources/upload", response_model=InfoSourceRead)
-async def upload_infosource(
-    name: str = Form(...),
-    source_type: str = Form(...),  # PEP, SANCTIONS, FRAUD, CLAIMS, OTHER
-    description: str = Form(""),
-    file: UploadFile = File(...),
-    mapping_json: Optional[str] = Form(None),
+# ...
+
+@app.post("/infosources/from-url", response_model=InfoSourceRead)
+def create_info_source_from_url(
+    name: str = Body(...),
+    source_type: str = Body(...),
+    url: str = Body(...),
+    description: Optional[str] = Body(None),
+    mapping_json: Optional[dict] = Body(None),  # ignorado por agora
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    request: Request = None,
+    current_user: User = Depends(get_current_admin),
 ):
     """
-    Upload de fontes:
-      - CSV / Excel (.xls, .xlsx) → guardado + indexado para matching
-      - PDF → guardado + extraído (heurística) para matching
+    VERSÃO ESTÁVEL (sem acesso externo):
+    - Valida que a URL é http/https
+    - Cria uma InfoSource com essa URL registada (sem tentar fazer download)
+    - NÃO rebenta o servidor, logo o front-end nunca vê 'Failed to fetch'.
     """
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in [".csv", ".xls", ".xlsx", ".pdf"]:
+
+    # 1) validação básica da URL
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
         raise HTTPException(
             status_code=400,
-            detail="Formato não suportado. Use ficheiros CSV, Excel ou PDF.",
+            detail="URL inválida. Use http:// ou https://",
         )
 
-    ensure_dir(UPLOAD_DIR)
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
-
-    # Guardar ficheiro
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-
-    # Criar registo da fonte
+    # 2) criar a fonte simples
     src = InfoSource(
         name=name,
         source_type=source_type.upper(),
         description=description,
-        file_path=file_path,
-        uploaded_by_id=current_user.id,
+        # se o teu modelo InfoSource tiver um campo 'remote_url', usa-o aqui:
+        # remote_url=url,
+        num_records=0,
     )
     db.add(src)
     db.commit()
     db.refresh(src)
 
-    # Indexar se for tabular (CSV / Excel)
-    if ext in [".csv", ".xls", ".xlsx"]:
-        index_tabular_file(db, src, file_path, mapping_json, ext)
-    else:
-        # PDF: tentar extrair entidades
-        extracted = extract_entities_from_pdf_file(file_path)
-        if extracted:
-            create_entities_from_extracted(db, src, extracted)
-        else:
-            src.num_records = src.num_records or 0
-            db.commit()
-            db.refresh(src)
-
-    ip = request.client.host if request and request.client else None
-    log_event(
-        db,
-        "upload_infosource",
-        user=current_user,
-        details=f"Fonte {src.name} ({src.source_type}) com {src.num_records} registos",
-        ip_address=ip,
-    )
-
     return src
-
 
 # -------------------------------------------------------
 #  FONTE A PARTIR DE URL (CSV / EXCEL / HTML / PDF)
