@@ -57,16 +57,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Check Insurance Risk Backend", version="3.0.0")
 
 # ---------------------- CORS ----------------------
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+app = FastAPI(title="Check Insurance Risk Backend", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],        # podes depois restringir ao teu domínio
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # ---------------------- Utilidades ----------------------
 
