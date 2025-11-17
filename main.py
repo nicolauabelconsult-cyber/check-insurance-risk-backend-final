@@ -1,4 +1,4 @@
-# main.py
+# main.py (trecho do topo)
 import os
 import csv
 import json
@@ -6,6 +6,7 @@ import difflib
 import time
 from typing import List, Optional, Tuple
 
+import requests  # <--- ADICIONAR
 from fastapi import (
     FastAPI,
     Depends,
@@ -17,14 +18,13 @@ from fastapi import (
     Query,
     Request,
     Body,
-    Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
 
-from database import Base, engine
+from sqlalchemy.orm import Session
+
+from database import Base, engine, SessionLocal
 from models import User, InfoSource, NormalizedEntity, RiskRecord, AuditLog
 from schemas import (
     LoginRequest,
@@ -51,12 +51,10 @@ from security import (
 from reporting import build_risk_report_pdf
 from utils import ensure_dir
 
-
 # Criar tabelas
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Check Insurance Risk Backend", version="3.0.0")
-
 
 # ---------------------- CORS ----------------------
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
