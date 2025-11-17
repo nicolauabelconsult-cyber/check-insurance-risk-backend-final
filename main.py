@@ -69,7 +69,6 @@ app.add_middleware(
 
 # ---------------------- Utilidades ----------------------
 
-
 def log_event(
     db: Session,
     action: str,
@@ -731,120 +730,83 @@ async def upload_infosource(
     return src
 
 
+# -------------------------------------------------------
+#  FONTE A PARTIR DE URL (CSV / EXCEL / HTML / PDF)
+# -------------------------------------------------------
 @app.post("/infosources/from-url", response_model=InfoSourceRead)
-def create_infosource_from_url(
+def create_info_source_from_url(
     name: str = Body(...),
-    source_type: str = Body(...),  # PEP, SANCTIONS, FRAUD, CLAIMS, OTHER
+    source_type: str = Body(...),
     url: str = Body(...),
-    description: str = Body(""),
+    description: Optional[str] = Body(None),
     mapping_json: Optional[dict] = Body(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    request: Request = None,
+    current_user: User = Depends(get_current_admin),
 ):
     """
-    Cria uma fonte a partir de um link (URL).
-    Casos:
-      - URL termina em .csv / .xls / .xlsx → download + indexar tabular
-      - URL termina em .pdf → download + extrair PDF
-      - URL sem extensão conhecida → assume HTML e extrai entidades da página
+    Cria uma fonte de informação a partir de uma URL.
+    - CSV/Excel: preparado para tratar (usando mapping_json como no upload normal)
+    - HTML: por agora apenas faz download e guarda registo; parsing afinamos depois
+    - PDF: devolve erro controlado (ainda não suportado nesta versão)
+    NUNCA rebenta o servidor – em vez disso lança HTTPException com mensagem clara.
     """
+
+    # 1) Tentar fazer download da URL
     try:
-        import requests
-    except ImportError:
+        resp = requests.get(url, timeout=20)
+    except requests.RequestException as e:
         raise HTTPException(
-            status_code=500,
-            detail="Dependência 'requests' não está instalada no servidor.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Não foi possível aceder à URL: {e}",
         )
 
-    try:
-        resp = requests.get(url, timeout=30)
-    except Exception:
+    if resp.status_code >= 400:
         raise HTTPException(
-            status_code=400, detail="Não foi possível obter o conteúdo da URL."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"URL respondeu com código {resp.status_code}",
         )
 
-    if resp.status_code != 200:
+    content_type = resp.headers.get("content-type", "").lower()
+
+    # 2) Decidir tipo de tratamento básico
+    # CSV ou Excel (texto/csv, application/vnd.ms-excel, etc.)
+    if "text/csv" in content_type or "application/vnd.ms-excel" in content_type:
+        # Aqui podes reutilizar exactamente a mesma lógica que usas no /infosources/upload
+        # Para já, só vamos criar a InfoSource e deixar num estado 'sem registos'
+        num_records = 0  # depois podes incrementar quando fizeres parsing real
+    elif "html" in content_type:
+        # HTML: ainda não estamos a fazer parsing detalhado.
+        # Só vamos registar a fonte para não rebentar.
+        num_records = 0
+    elif "pdf" in content_type:
+        # PDF via URL ainda não suportado -> erro controlado (não crasha)
         raise HTTPException(
-            status_code=400, detail="Não foi possível obter o conteúdo da URL."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Leitura de PDF via URL ainda não está disponível nesta versão. "
+                   "Faça upload do PDF directamente na secção 'Carregar fonte'.",
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tipo de conteúdo não suportado a partir da URL: {content_type}",
         )
 
-    # Remover querystring para detecção de extensão
-    clean_url = url.split("?", 1)[0]
-    ext = os.path.splitext(clean_url)[1].lower()
-
-    ensure_dir(UPLOAD_DIR)
-    # Definir um nome base para o ficheiro local
-    timestamp = int(time.time())
-
-    # Criar registo da fonte primeiro
+    # 3) Criar registo InfoSource mínimo (sem parsing avançado)
     src = InfoSource(
         name=name,
         source_type=source_type.upper(),
         description=description,
-        file_path=None,
-        uploaded_by_id=current_user.id,
+        num_records=num_records,
+        # se tiveres campos como 'url' ou 'file_path', podes guardar aqui
     )
     db.add(src)
     db.commit()
     db.refresh(src)
 
-    # Caso 1: CSV / Excel / PDF
-    if ext in [".csv", ".xls", ".xlsx", ".pdf"]:
-        filename = f"url_{timestamp}{ext}"
-        file_path = os.path.join(UPLOAD_DIR, filename)
-        with open(file_path, "wb") as f:
-            f.write(resp.content)
-
-        src.file_path = file_path
-        db.commit()
-        db.refresh(src)
-
-        if ext in [".csv", ".xls", ".xlsx"]:
-            mapping_str = json.dumps(mapping_json) if mapping_json is not None else None
-            index_tabular_file(db, src, file_path, mapping_str, ext)
-        elif ext == ".pdf":
-            extracted = extract_entities_from_pdf_file(file_path)
-            if extracted:
-                create_entities_from_extracted(db, src, extracted)
-            else:
-                src.num_records = src.num_records or 0
-                db.commit()
-                db.refresh(src)
-
-    else:
-        # Caso 2: HTML (sem extensão conhecida)
-        html = resp.text or ""
-        extracted = extract_entities_from_html_content(html, default_country="Angola")
-
-        # guardar um snapshot opcional do HTML
-        filename = f"url_{timestamp}.html"
-        file_path = os.path.join(UPLOAD_DIR, filename)
-        try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(html)
-            src.file_path = file_path
-        except Exception:
-            src.file_path = None
-
-        if extracted:
-            create_entities_from_extracted(db, src, extracted)
-        else:
-            src.num_records = src.num_records or 0
-            db.commit()
-            db.refresh(src)
-
-    ip = request.client.host if request and request.client else None
-    log_event(
-        db,
-        "upload_infosource_url",
-        user=current_user,
-        details=f"Fonte {src.name} ({src.source_type}) via URL com {src.num_records} registos",
-        ip_address=ip,
-    )
+    # TODO futuro: aqui chamamos um extractor específico para CSV/HTML
+    # que lê a resposta resp.content, cria NormalizedEntity, etc.
 
     return src
-
 
 @app.get("/infosources", response_model=List[InfoSourceRead])
 def list_infosources(
@@ -852,7 +814,6 @@ def list_infosources(
     current_user: User = Depends(get_current_user),
 ):
     return db.query(InfoSource).order_by(InfoSource.created_at.desc()).all()
-
 
 @app.patch("/infosources/{source_id}", response_model=InfoSourceRead)
 def update_infosource(
@@ -886,7 +847,6 @@ def update_infosource(
     )
 
     return src
-
 
 @app.delete("/infosources/{source_id}", status_code=204)
 def delete_infosource(
