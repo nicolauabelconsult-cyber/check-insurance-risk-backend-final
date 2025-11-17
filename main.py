@@ -23,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+
 
 from database import Base, engine, SessionLocal
 from models import User, InfoSource, NormalizedEntity, RiskRecord, AuditLog
