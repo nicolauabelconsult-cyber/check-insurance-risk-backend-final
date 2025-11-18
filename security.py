@@ -1,134 +1,110 @@
-# security.py
-import os
-import hmac
-import hashlib
-from datetime import datetime, timedelta
-from typing import Optional
-
+"""
+Módulo de segurança
+"""
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
-from sqlalchemy.orm import Session
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from auth import verify_token
+from database import execute_query
+from models import UserInfo, RoleEnum
 
-from database import SessionLocal
-from models import User
+security = HTTPBearer()
 
-
-# -------------------------------------------------
-# CONFIGURAÇÃO JWT E HASH
-# -------------------------------------------------
-SECRET_KEY = os.getenv("SECRET_KEY", "check-insurance-risk-dev-secret")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_HOURS = 12
-
-PASSWORD_SALT = os.getenv("PASSWORD_SALT", "cir-dev-salt")
-
-
-# -------------------------------------------------
-# DB
-# -------------------------------------------------
-def get_db():
-    db = SessionLocal()
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> UserInfo:
+    """Obter usuário atual do token"""
     try:
-        yield db
-    finally:
-        db.close()
-
-
-# -------------------------------------------------
-# HASH DE PASSWORD (simples, suficiente para POC)
-# -------------------------------------------------
-def _hash_internal(password: str) -> str:
-    data = (password + PASSWORD_SALT).encode("utf-8")
-    return hashlib.sha256(data).hexdigest()
-
-
-def hash_password(password: str) -> str:
-    return _hash_internal(password)
-
-
-def verify_password(plain_password: str, password_hash: str) -> bool:
-    return hmac.compare_digest(_hash_internal(plain_password), password_hash)
-
-
-# -------------------------------------------------
-# TOKEN JWT
-# -------------------------------------------------
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS))
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-
-# -------------------------------------------------
-# UTILIZADOR AUTENTICADO
-# -------------------------------------------------
-def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
-) -> User:
-    """
-    Versão mais tolerante (DEV):
-
-    1) Tenta validar o token JWT.
-    2) Tenta encontrar o utilizador pelo ID (sub) ou pelo username.
-    3) Se falhar, faz fallback para o utilizador 'admin'.
-    """
-    # 1) tentar decodificar o token normalmente
-    payload = None
-    if token:
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        except JWTError:
-            # ignora erro, vamos tentar fallback
-            payload = None
-
-    user: Optional[User] = None
-
-    # 2) tentar obter o utilizador a partir do payload
-    if payload:
-        sub = payload.get("sub")
-        username_claim = payload.get("username")
-
-        # tentar primeiro como ID
-        if sub is not None:
-            try:
-                user_id = int(sub)
-                user = db.query(User).filter(User.id == user_id).first()
-            except (TypeError, ValueError):
-                user = None
-
-        # se ainda não encontrou, tenta por username
-        if user is None and username_claim:
-            user = db.query(User).filter(User.username == username_claim).first()
-
-    # 3) Fallback DEV: se nada disso funcionar, usa o admin
-    if user is None:
-        user = db.query(User).filter(User.username == "admin").first()
-
-    if not user:
+        token = credentials.credentials
+        payload = verify_token(token)
+        
+        # Buscar usuário no banco
+        query = """
+            SELECT id, username, email, role, is_active, last_login, created_at
+            FROM users WHERE id = %s AND is_active = true
+        """
+        users = execute_query(query, (payload['id'],))
+        
+        if not users:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuário não encontrado"
+            )
+        
+        user = users[0]
+        return UserInfo(
+            id=user['id'],
+            username=user['username'],
+            email=user['email'],
+            role=user['role'],
+            last_login=user['last_login'],
+            created_at=user['created_at']
+        )
+        
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Utilizador não encontrado (nem admin).",
+            detail="Token inválido"
         )
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Utilizador inactivo.",
-        )
-
-    return user
-
-def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
-    if not current_user.is_admin:
+async def get_admin_user(
+    current_user: UserInfo = Depends(get_current_user)
+) -> UserInfo:
+    """Verificar se usuário é admin"""
+    if current_user.role != RoleEnum.admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acesso restrito a administradores",
+            detail="Acesso negado: permissões de administrador necessárias"
         )
     return current_user
+
+def create_jwt(data: dict) -> str:
+    """Criar JWT token (alias para create_access_token)"""
+    from auth import create_access_token
+    return create_access_token(data)
+
+def verify_jwt(token: str) -> dict:
+    """Verificar JWT token (alias para verify_token)"""
+    from auth import verify_token
+    return verify_token(token)
+
+def hash_password(password: str) -> str:
+    """Hash de senha (alias para get_password_hash)"""
+    from auth import get_password_hash
+    return get_password_hash(password)
+
+def check_password(plain_password: str, hashed_password: str) -> bool:
+    """Verificar senha (alias para verify_password)"""
+    from auth import verify_password
+    return verify_password(plain_password, hashed_password)
+
+class RateLimiter:
+    """Rate limiting simples"""
+    def __init__(self, max_requests: int = 100, window: int = 3600):
+        self.max_requests = max_requests
+        self.window = window
+        self.requests = {}
+    
+    def is_allowed(self, key: str) -> bool:
+        """Verificar se requisição é permitida"""
+        import time
+        now = time.time()
+        
+        if key not in self.requests:
+            self.requests[key] = []
+        
+        # Remove requisições antigas
+        self.requests[key] = [
+            req_time for req_time in self.requests[key] 
+            if now - req_time < self.window
+        ]
+        
+        # Verifica limite
+        if len(self.requests[key]) >= self.max_requests:
+            return False
+        
+        # Adiciona requisição atual
+        self.requests[key].append(now)
+        return True
+
+# Instância global do rate limiter
+rate_limiter = RateLimiter()
