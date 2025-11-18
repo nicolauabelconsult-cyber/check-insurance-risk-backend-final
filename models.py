@@ -1,110 +1,99 @@
-# models.py
+"""
+Modelos Pydantic
+"""
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
 from datetime import datetime
-from sqlalchemy import (
-    Column,
-    Integer,
-    String,
-    Boolean,
-    DateTime,
-    Text,
-    ForeignKey,
-    JSON,
-    Index,
-)
-from sqlalchemy.orm import relationship
-from database import Base
+from enum import Enum
 
+class RoleEnum(str, Enum):
+    admin = "admin"
+    analyst = "analyst"
 
-class User(Base):
-    __tablename__ = "users"
+class SourceTypeEnum(str, Enum):
+    PEP = "PEP"
+    SANCTIONS = "SANCTIONS"
+    FRAUD = "FRAUD"
+    CLAIMS = "CLAIMS"
+    OTHER = "OTHER"
 
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(100), unique=True, index=True, nullable=False)
-    full_name = Column(String(200), nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    is_admin = Column(Boolean, default=False)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+class RiskLevelEnum(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
-    risk_records = relationship("RiskRecord", back_populates="analyst")
+class DecisionEnum(str, Enum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    UNDER_REVIEW = "UNDER_REVIEW"
 
+# Request Models
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=100)
+    password: str = Field(..., min_length=6)
 
-class InfoSource(Base):
-    __tablename__ = "info_sources"
+class RiskCheckRequest(BaseModel):
+    full_name: Optional[str] = None
+    nif: Optional[str] = None
+    passport: Optional[str] = None
+    resident_card: Optional[str] = None
+    notes: Optional[str] = None
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(200), nullable=False)
-    source_type = Column(String(50), nullable=False)  # PEP, SANCTIONS, FRAUD, CLAIMS, OTHER
-    description = Column(Text, default="")
-    file_path = Column(String(500), nullable=False)
-    num_records = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    uploaded_by_id = Column(Integer, ForeignKey("users.id"))
+class DecisionRequest(BaseModel):
+    decision: DecisionEnum
+    notes: Optional[str] = None
 
+class InfoSourceRequest(BaseModel):
+    name: str = Field(..., max_length=255)
+    source_type: SourceTypeEnum
 
-class NormalizedEntity(Base):
-    """
-    Representa um registo normalizado vindo de uma fonte (pessoa ou entidade).
-    Permite pesquisa rápida por nome, nif, passaporte, etc.
-    """
-    __tablename__ = "normalized_entities"
+# Response Models
+class UserInfo(BaseModel):
+    id: int
+    username: str
+    email: str
+    role: RoleEnum
+    last_login: Optional[datetime] = None
+    created_at: Optional[datetime] = None
 
-    id = Column(Integer, primary_key=True, index=True)
-    source_id = Column(Integer, ForeignKey("info_sources.id"), nullable=False)
+class LoginResponse(BaseModel):
+    success: bool
+    token: str
+    user: UserInfo
 
-    person_name = Column(String(300), index=True, nullable=True)
-    person_nif = Column(String(50), index=True, nullable=True)
-    person_passport = Column(String(50), index=True, nullable=True)
-    residence_card = Column(String(50), index=True, nullable=True)
+class RiskAnalysisInfo(BaseModel):
+    id: int
+    full_name: Optional[str] = None
+    risk_level: Optional[RiskLevelEnum] = None
+    risk_score: Optional[int] = None
+    analyzed_at: Optional[datetime] = None
+    decision: Optional[DecisionEnum] = None
+    analyst_name: Optional[str] = None
 
-    role = Column(String(200), nullable=True)
-    country = Column(String(100), nullable=True)
+class DashboardStats(BaseModel):
+    totalAnalyses: int
+    pendingReview: int
+    highRiskCases: int
+    activeSources: int
+    recentAnalyses: List[RiskAnalysisInfo]
+    riskDistribution: Optional[Dict[str, int]] = None
 
-    raw_payload = Column(JSON, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+class RiskCheckResponse(BaseModel):
+    success: bool
+    id: int
+    risk_score: int
+    risk_level: RiskLevelEnum
+    matches: List[Dict[str, Any]]
+    risk_factors: List[str]
+    analyzed_at: datetime
 
-    source = relationship("InfoSource")
-
-Index("idx_normalized_entities_nif", NormalizedEntity.person_nif)
-Index("idx_normalized_entities_name", NormalizedEntity.person_name)
-
-
-class RiskRecord(Base):
-    __tablename__ = "risk_records"
-
-    id = Column(Integer, primary_key=True, index=True)
-    full_name = Column(String(200), nullable=False)
-    nif = Column(String(50), nullable=True)
-    passport = Column(String(50), nullable=True)
-    residence_card = Column(String(50), nullable=True)
-
-    risk_score = Column(Integer, nullable=False)
-    risk_level = Column(String(20), nullable=False)  # LOW, MEDIUM, HIGH, CRITICAL
-    is_pep = Column(Boolean, default=False)
-    has_sanctions = Column(Boolean, default=False)
-
-    # Lista completa de matches e factores (JSON serializado)
-    matches_json = Column(Text, nullable=False)
-    factors_json = Column(Text, nullable=False)
-
-    # Match principal escolhido pelo analista (opcional)
-    primary_match_json = Column(Text, nullable=True)
-
-    decision = Column(String(50), nullable=True)  # ACCEPT, CONDITIONAL, REJECT
-    analyst_notes = Column(Text, nullable=True)
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-    analyst_id = Column(Integer, ForeignKey("users.id"))
-    analyst = relationship("User", back_populates="risk_records")
-
-
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    username = Column(String(100), nullable=True)
-    action = Column(String(100), nullable=False)
-    details = Column(Text, nullable=True)
-    ip_address = Column(String(100), nullable=True)
+class InfoSourceInfo(BaseModel):
+    id: int
+    name: str
+    source_type: SourceTypeEnum
+    file_type: Optional[str] = None
+    num_records: int = 0
+    uploaded_at: datetime
+    uploaded_by_name: Optional[str] = None
+    is_active: bool = True
