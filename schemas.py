@@ -1,135 +1,67 @@
-# schemas.py
-from typing import List, Optional
+"""
+Schemas de validação
+"""
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
-
-
-# ---------- Users & Auth ----------
-
-class UserBase(BaseModel):
-    username: str
-    full_name: str
-    is_admin: bool
-    is_active: bool
-
+from models import RoleEnum, SourceTypeEnum, RiskLevelEnum, DecisionEnum
 
 class UserCreate(BaseModel):
-    username: str
-    full_name: str
-    password: str
-    is_admin: bool = False
+    username: str = Field(..., min_length=3, max_length=100)
+    email: str = Field(..., regex=r'^[\w\.-]+@[\w\.-]+\.\w+$')
+    password: str = Field(..., min_length=6)
+    role: RoleEnum = Field(default=RoleEnum.analyst)
 
+class UserUpdate(BaseModel):
+    username: Optional[str] = Field(None, min_length=3, max_length=100)
+    email: Optional[str] = Field(None, regex=r'^[\w\.-]+@[\w\.-]+\.\w+$')
+    role: Optional[RoleEnum] = None
+    is_active: Optional[bool] = None
 
-class UserRead(UserBase):
-    id: int
-    created_at: datetime
+class InfoSourceCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    source_type: SourceTypeEnum
+    url: Optional[str] = None
+    
+    @validator('url')
+    def validate_url(cls, v):
+        if v and not (v.startswith('http://') or v.startswith('https://')):
+            raise ValueError('URL deve começar com http:// ou https://')
+        return v
 
-    class Config:
-        orm_mode = True
+class RiskRecordCreate(BaseModel):
+    full_name: Optional[str] = Field(None, max_length=255)
+    nif: Optional[str] = Field(None, max_length=50)
+    passport: Optional[str] = Field(None, max_length=50)
+    resident_card: Optional[str] = Field(None, max_length=50)
+    notes: Optional[str] = None
+    
+    @validator('full_name', 'nif', 'passport', 'resident_card')
+    def at_least_one_identifier(cls, v, values):
+        if not any([v, values.get('full_name'), values.get('nif'), 
+                   values.get('passport'), values.get('resident_card')]):
+            raise ValueError('Pelo menos um identificador deve ser fornecido')
+        return v
 
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
-# ---------- Risk check ----------
-
-class RiskCheckRequest(BaseModel):
-    full_name: str = Field(..., description="Nome completo do cliente")
-    nif: Optional[str] = None
-    passport: Optional[str] = None
-    residence_card: Optional[str] = None
-    extra_info: Optional[str] = None
-
-
-class Match(BaseModel):
-    source_id: int
-    source_name: str
-    source_type: str
-    match_name: str
-    match_identifier: Optional[str] = None
-    similarity: float
-    details: dict
-
-
-class RiskFactor(BaseModel):
-    code: str
-    description: str
-    weight: int
-
-
-class RiskCheckResponse(BaseModel):
-    id: int
-    full_name: str
-    nif: Optional[str]
-    passport: Optional[str]
-    residence_card: Optional[str]
-    risk_score: int
-    risk_level: str
-    is_pep: bool
-    has_sanctions: bool
-    matches: List[Match]
-    factors: List[RiskFactor]
-    decision: Optional[str]
-    analyst_notes: Optional[str]
-    created_at: datetime
-
-    class Config:
-        orm_mode = True
-
-
-class RiskHistoryItem(BaseModel):
-    id: int
-    full_name: str
-    nif: Optional[str]
-    risk_score: int
-    risk_level: str
-    is_pep: bool
-    has_sanctions: bool
-    created_at: datetime
-
-    class Config:
-        orm_mode = True
-
-
-class RiskDecisionUpdate(BaseModel):
-    decision: str  # ACCEPT, CONDITIONAL, REJECT
+class RiskDecision(BaseModel):
+    decision: DecisionEnum
     analyst_notes: Optional[str] = None
-    primary_match_index: Optional[int] = Field(
-        default=None,
-        description="Índice do match escolhido como principal (0, 1, 2, ...). Opcional."
-    )
 
+class SearchQuery(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    page: int = Field(default=1, ge=1)
+    limit: int = Field(default=10, ge=1, le=100)
 
-# ---------- Info Sources ----------
+class PaginationResponse(BaseModel):
+    page: int
+    limit: int
+    total: int
+    totalPages: int
+    hasNext: bool
+    hasPrev: bool
 
-class InfoSourceRead(BaseModel):
-    id: int
-    name: str
-    source_type: str
-    description: str
-    num_records: int
-    created_at: datetime
-
-    class Config:
-        orm_mode = True
-
-
-# ---------- Audit Logs ----------
-
-class AuditLogRead(BaseModel):
-    id: int
-    timestamp: datetime
-    username: Optional[str]
-    action: str
-    details: Optional[str]
-    ip_address: Optional[str]
-
-    class Config:
-        orm_mode = True
+class ApiResponse(BaseModel):
+    success: bool
+    message: Optional[str] = None
+    data: Optional[Any] = None
+    errors: Optional[List[str]] = None
