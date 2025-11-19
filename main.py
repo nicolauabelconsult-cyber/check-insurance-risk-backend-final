@@ -48,16 +48,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-@app.get("/")
-async def root():
-    return {
-        "message": "Check Insurance Risk API",
-        "status": "Online",
-        "version": "2.0.0",
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
+@app.get("/api/auth/me")
+async def get_me(current_user: UserInfo = Depends(get_current_user)):
+    """
+    Devolve o utilizador autenticado com base no token JWT.
+    Necessário para o frontend manter a sessão.
+    """
+    return current_user
 
 # -------------------------------------------------------------------------
 # Autenticação
