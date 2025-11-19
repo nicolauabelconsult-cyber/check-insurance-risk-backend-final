@@ -1,42 +1,60 @@
-
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.middleware.cors import CORSMIDDLEWARE, CORSMiddleware
-from fastapi.responses import StreamingResponse
+"""
+Check Insurance Risk - Backend FastAPI
+main.py final
+"""
 from datetime import datetime
 from typing import Dict, List, Optional
-import json
-import io
-import base64
-import uvicorn
 
-from auth import verify_password, create_access_token
+import base64
+import io
+import json
+
+import uvicorn
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
+from auth import create_access_token, verify_password
 from database import execute_query
 from models import (
-    LoginRequest,
-    RiskCheckRequest,
-    DecisionRequest,
-    LoginResponse,
     DashboardStats,
-    RiskCheckResponse,
+    DecisionRequest,
     InfoSourceInfo,
+    LoginRequest,
+    LoginResponse,
+    RiskCheckRequest,
+    RiskCheckResponse,
     UserInfo,
 )
-from utils import calculate_risk_score, perform_matching
-from reporting import generate_pdf_report, export_to_excel, generate_dashboard_charts
+from reporting import (
+    export_to_excel,
+    generate_dashboard_charts,
+    generate_pdf_report,
+)
 from security import get_current_user
+from utils import calculate_risk_score, perform_matching
 
-app = FastAPI(title="Check Insurance Risk API",
-              description="Sistema de análise de risco para seguradoras",
-              version="2.0.0")
+# ----------------------------------------------------------------------
+# APP & CORS
+# ----------------------------------------------------------------------
+app = FastAPI(
+    title="Check Insurance Risk API",
+    description="Sistema de análise de risco para seguradoras",
+    version="2.0.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # em produção, restringir ao domínio do frontend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# ----------------------------------------------------------------------
+# HEALTH CHECK
+# ----------------------------------------------------------------------
 @app.get("/")
 async def root():
     return {
@@ -46,8 +64,15 @@ async def root():
         "timestamp": datetime.utcnow().isoformat(),
     }
 
+
+# ----------------------------------------------------------------------
+# AUTENTICAÇÃO
+# ----------------------------------------------------------------------
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
+    """
+    Login por username OU email, devolve token JWT + dados do utilizador.
+    """
     try:
         query = """
             SELECT id, username, email, password_hash, role, is_active,
@@ -56,6 +81,7 @@ async def login(request: LoginRequest):
             WHERE (username = %s OR email = %s) AND is_active = true
         """
         users = execute_query(query, (request.username, request.username))
+
         if not users:
             raise HTTPException(status_code=401, detail="Credenciais inválidas")
 
@@ -64,14 +90,20 @@ async def login(request: LoginRequest):
         if not verify_password(request.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Credenciais inválidas")
 
-        execute_query("UPDATE users SET last_login = NOW() WHERE id = %s", (user["id"],))
+        # actualizar last_login
+        execute_query(
+            "UPDATE users SET last_login = NOW() WHERE id = %s",
+            (user["id"],),
+        )
 
-        token = create_access_token({
-            "id": user["id"],
-            "username": user["username"],
-            "email": user["email"],
-            "role": user["role"],
-        })
+        token = create_access_token(
+            {
+                "id": user["id"],
+                "username": user["username"],
+                "email": user["email"],
+                "role": user["role"],
+            }
+        )
 
         return {
             "success": True,
@@ -85,20 +117,32 @@ async def login(request: LoginRequest):
                 "created_at": user["created_at"],
             },
         }
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"Erro no login: {e}")
         raise HTTPException(status_code=500, detail="Erro interno")
 
+
 @app.get("/api/auth/me", response_model=UserInfo)
 async def get_me(current_user: UserInfo = Depends(get_current_user)):
+    """
+    Endpoint usado pelo frontend para validar o token e manter a sessão.
+    """
     return current_user
 
+
+# ----------------------------------------------------------------------
+# DASHBOARD
+# ----------------------------------------------------------------------
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
-async def get_dashboard_stats(current_user: UserInfo = Depends(get_current_user)):
+async def get_dashboard_stats(
+    current_user: UserInfo = Depends(get_current_user),
+):
     try:
         total = execute_query("SELECT COUNT(*) AS count FROM risk_records")[0]["count"]
+
         pending = execute_query(
             """
             SELECT COUNT(*) AS count
@@ -106,6 +150,7 @@ async def get_dashboard_stats(current_user: UserInfo = Depends(get_current_user)
             WHERE decision = 'UNDER_REVIEW' OR decision IS NULL
             """
         )[0]["count"]
+
         high_risk = execute_query(
             """
             SELECT COUNT(*) AS count
@@ -113,9 +158,11 @@ async def get_dashboard_stats(current_user: UserInfo = Depends(get_current_user)
             WHERE risk_level IN ('HIGH', 'CRITICAL')
             """
         )[0]["count"]
+
         sources = execute_query(
             "SELECT COUNT(*) AS count FROM info_sources WHERE is_active = true"
         )[0]["count"]
+
         risk_dist_rows = execute_query(
             """
             SELECT risk_level, COUNT(*) AS count
@@ -127,6 +174,7 @@ async def get_dashboard_stats(current_user: UserInfo = Depends(get_current_user)
         risk_distribution: Dict[str, int] = {
             row["risk_level"]: row["count"] for row in risk_dist_rows
         }
+
         recent = execute_query(
             """
             SELECT r.id, r.full_name, r.risk_level, r.risk_score,
@@ -137,6 +185,7 @@ async def get_dashboard_stats(current_user: UserInfo = Depends(get_current_user)
             LIMIT 10
             """
         )
+
         return {
             "totalAnalyses": total,
             "pendingReview": pending,
@@ -145,24 +194,40 @@ async def get_dashboard_stats(current_user: UserInfo = Depends(get_current_user)
             "recentAnalyses": recent,
             "riskDistribution": risk_distribution,
         }
+
     except Exception as e:
         print(f"Erro dashboard: {e}")
         raise HTTPException(status_code=500, detail="Erro interno")
 
-@app.post("/api/risk/check", response_model=RiskCheckResponse)
-async def risk_check(request: RiskCheckRequest,
-                     current_user: UserInfo = Depends(get_current_user)):
-    try:
-        if not any([request.full_name, request.nif, request.passport, request.resident_card]):
-            raise HTTPException(status_code=400,
-                                detail="Pelo menos um identificador é necessário")
 
-        matches = perform_matching({
-            "full_name": request.full_name,
-            "nif": request.nif,
-            "passport": request.passport,
-            "resident_card": request.resident_card,
-        })
+# ----------------------------------------------------------------------
+# ANÁLISE DE RISCO
+# ----------------------------------------------------------------------
+@app.post("/api/risk/check", response_model=RiskCheckResponse)
+async def risk_check(
+    request: RiskCheckRequest,
+    current_user: UserInfo = Depends(get_current_user),
+):
+    """
+    Executa a análise de risco, grava no banco e devolve o resultado.
+    """
+    try:
+        if not any(
+            [request.full_name, request.nif, request.passport, request.resident_card]
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Pelo menos um identificador é necessário",
+            )
+
+        matches = perform_matching(
+            {
+                "full_name": request.full_name,
+                "nif": request.nif,
+                "passport": request.passport,
+                "resident_card": request.resident_card,
+            }
+        )
 
         risk_data = calculate_risk_score(matches, bool(request.nif))
 
@@ -203,14 +268,21 @@ async def risk_check(request: RiskCheckRequest,
             "risk_factors": risk_data["factors"],
             "analyzed_at": analyzed_at,
         }
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"Erro análise: {e}")
         raise HTTPException(status_code=500, detail="Erro interno")
 
+
+# ----------------------------------------------------------------------
+# FONTES DE INFORMAÇÃO
+# ----------------------------------------------------------------------
 @app.get("/api/info-sources", response_model=List[InfoSourceInfo])
-async def get_info_sources(current_user: UserInfo = Depends(get_current_user)):
+async def get_info_sources(
+    current_user: UserInfo = Depends(get_current_user),
+):
     try:
         sources = execute_query(
             """
@@ -226,11 +298,20 @@ async def get_info_sources(current_user: UserInfo = Depends(get_current_user)):
         print(f"Erro fontes: {e}")
         raise HTTPException(status_code=500, detail="Erro interno")
 
+
+# ----------------------------------------------------------------------
+# PDF / EXCEL / GRÁFICOS
+# ----------------------------------------------------------------------
 @app.get("/api/risk/{risk_id}/report/pdf")
-async def download_risk_pdf(risk_id: int,
-                            current_user: UserInfo = Depends(get_current_user)):
+async def download_risk_pdf(
+    risk_id: int,
+    current_user: UserInfo = Depends(get_current_user),
+):
     try:
-        records = execute_query("SELECT * FROM risk_records WHERE id = %s", (risk_id,))
+        records = execute_query(
+            "SELECT * FROM risk_records WHERE id = %s",
+            (risk_id,),
+        )
         if not records:
             raise HTTPException(status_code=404, detail="Registo não encontrado")
 
@@ -245,16 +326,20 @@ async def download_risk_pdf(risk_id: int,
         return StreamingResponse(
             io.BytesIO(pdf_bytes),
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
         )
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"Erro ao gerar PDF: {e}")
         raise HTTPException(status_code=500, detail="Erro interno ao gerar PDF")
 
+
 @app.get("/api/risk/export/excel")
-async def export_risk_excel(current_user: UserInfo = Depends(get_current_user)):
+async def export_risk_excel(
+    current_user: UserInfo = Depends(get_current_user),
+):
     try:
         records = execute_query(
             """
@@ -276,17 +361,23 @@ async def export_risk_excel(current_user: UserInfo = Depends(get_current_user)):
 
         return StreamingResponse(
             io.BytesIO(excel_bytes),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
         )
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"Erro ao exportar Excel: {e}")
         raise HTTPException(status_code=500, detail="Erro interno ao exportar Excel")
 
+
 @app.get("/api/dashboard/charts")
-async def get_charts(current_user: UserInfo = Depends(get_current_user)):
+async def get_charts(
+    current_user: UserInfo = Depends(get_current_user),
+):
     try:
         chart_info = generate_dashboard_charts()
         if isinstance(chart_info, dict) and chart_info.get("error"):
@@ -298,10 +389,16 @@ async def get_charts(current_user: UserInfo = Depends(get_current_user)):
         print(f"Erro ao gerar gráficos: {e}")
         raise HTTPException(status_code=500, detail="Erro interno ao gerar gráficos")
 
+
+# ----------------------------------------------------------------------
+# DECISÃO E HISTÓRICO
+# ----------------------------------------------------------------------
 @app.put("/api/risk/{risk_id}/decision")
-async def update_risk_decision(risk_id: int,
-                               request: DecisionRequest,
-                               current_user: UserInfo = Depends(get_current_user)):
+async def update_risk_decision(
+    risk_id: int,
+    request: DecisionRequest,
+    current_user: UserInfo = Depends(get_current_user),
+):
     try:
         result = execute_query(
             """
@@ -314,26 +411,36 @@ async def update_risk_decision(risk_id: int,
             """,
             (request.decision, request.notes, risk_id),
         )
+
         if not result:
             raise HTTPException(status_code=404, detail="Registo não encontrado")
+
         return {"success": True, "record": result[0]}
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"Erro ao actualizar decisão: {e}")
-        raise HTTPException(status_code=500,
-                            detail="Erro interno ao actualizar decisão de risco")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro interno ao actualizar decisão de risco",
+        )
+
 
 @app.get("/api/risk/history")
-async def get_risk_history(full_name: Optional[str] = None,
-                           nif: Optional[str] = None,
-                           passport: Optional[str] = None,
-                           resident_card: Optional[str] = None,
-                           current_user: UserInfo = Depends(get_current_user)):
+async def get_risk_history(
+    full_name: Optional[str] = None,
+    nif: Optional[str] = None,
+    passport: Optional[str] = None,
+    resident_card: Optional[str] = None,
+    current_user: UserInfo = Depends(get_current_user),
+):
     try:
         if not any([full_name, nif, passport, resident_card]):
-            raise HTTPException(status_code=400,
-                                detail="Pelo menos um identificador deve ser fornecido")
+            raise HTTPException(
+                status_code=400,
+                detail="Pelo menos um identificador deve ser fornecido",
+            )
 
         conditions = []
         params: List[str] = []
@@ -362,13 +469,18 @@ async def get_risk_history(full_name: Optional[str] = None,
         """
 
         history = execute_query(query, tuple(params))
+
         return {"success": True, "count": len(history), "history": history}
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"Erro ao obter histórico: {e}")
-        raise HTTPException(status_code=500,
-                            detail="Erro interno ao obter histórico do assegurado")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro interno ao obter histórico do assegurado",
+        )
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
