@@ -601,13 +601,14 @@ async def get_risk_history(
 # Criar utilizador principal automaticamente no arranque
 from seed_admin import seed_default_user
 
-
+# Criar utilizador principal automaticamente no arranque
 @app.on_event("startup")
 def ensure_default_user():
     try:
         seed_default_user()
     except Exception as e:
         print(f"[startup] Erro ao garantir utilizador padrão: {e}")
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
