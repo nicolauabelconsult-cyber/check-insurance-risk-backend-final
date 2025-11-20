@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from seed_admin import run as run_seed_admin
 
 from auth import create_access_token, verify_password
 from database import execute_query, execute_transaction
@@ -597,6 +598,16 @@ async def get_risk_history(
             detail="Erro interno ao obter histórico do assegurado",
         )
 
+# Criar utilizador principal automaticamente no arranque
+from seed_admin import seed_default_user
+
+
+@app.on_event("startup")
+def ensure_default_user():
+    try:
+        seed_default_user()
+    except Exception as e:
+        print(f"[startup] Erro ao garantir utilizador padrão: {e}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
