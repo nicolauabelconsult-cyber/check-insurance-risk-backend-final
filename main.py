@@ -1,4 +1,3 @@
-
 """Check Insurance Risk - Backend FastAPI (independente de plataforma)"""
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -30,6 +29,8 @@ from models import (
 from reporting import export_to_excel, generate_dashboard_charts, generate_pdf_report
 from security import get_current_user, get_admin_user
 from utils import calculate_risk_score, normalize_country, perform_matching
+from seed_admin import run as seed_default_user  # ✅ NOVO IMPORT
+
 
 app = FastAPI(
     title="Check Insurance Risk API",
@@ -44,6 +45,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ✅ CRIAR UTILIZADOR PRINCIPAL AUTOMATICAMENTE NO ARRANQUE
+@app.on_event("startup")
+def ensure_default_user():
+    try:
+        seed_default_user()
+    except Exception as e:
+        # Não bloqueia o arranque da API se der erro, só regista
+        print(f"[startup] Erro ao garantir utilizador padrão: {e}")
 
 
 @app.get("/")
@@ -324,9 +334,15 @@ async def upload_info_source(
             return None
 
         for row in reader:
-            full_name = pick(row, ["Nome", "NOME", "Full Name", "FULL_NAME", "full_name", "name", "Name"])
+            full_name = pick(
+                row,
+                ["Nome", "NOME", "Full Name", "FULL_NAME", "full_name", "name", "Name"],
+            )
             nif = pick(row, ["NIF", "nif", "Tax ID", "tax_id", "NIF\ufeff"])
-            position = pick(row, ["Cargo", "Função", "Funcao", "Position", "role", "ROLE", "Função/Cargo"])
+            position = pick(
+                row,
+                ["Cargo", "Função", "Funcao", "Position", "role", "ROLE", "Função/Cargo"],
+            )
             country_raw = pick(
                 row,
                 ["Nacionalidade", "Nationality", "País", "Pais", "Country", "country"],
