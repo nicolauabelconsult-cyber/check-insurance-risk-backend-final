@@ -53,9 +53,7 @@ def ensure_default_user():
     try:
         seed_default_user()
     except Exception as e:
-        # Não bloqueia o arranque da API se der erro, só regista
-        print(f"[startup] Erro ao garantir utilizador padrão: {e}")
-
+        print(f"[startup] Erro ao garantir utilizador principal: {e}")
 
 @app.get("/")
 async def root():
