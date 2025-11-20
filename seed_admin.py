@@ -1,78 +1,43 @@
-from auth import get_password_hash
+# seed_admin.py
+"""
+Criar utilizador principal (seed) para o Check Insurance Risk
+"""
+
 from database import execute_query
+from auth import get_password_hash
 
 
-def run():
+def seed_default_user():
     """
-    Cria ou actualiza o utilizador inicial definitivo
-    e desactiva o admin antigo, se existir.
+    Garante que existe pelo menos um utilizador principal.
+
+    Login:
+      - Email:    nicolauabel.consult@gmail.com
+      - Username: nicolauabel
+      - Password: Qwerty080397
     """
 
-    username = "nicolauabel"
     email = "nicolauabel.consult@gmail.com"
-    password = "Qwerty080397"
-    role = "admin"
+    username = "nicolauabel"
+    plain_password = "Qwerty080397"
 
-    # Gerar hash da palavra-passe
-    password_hash = get_password_hash(password)
+    hashed_password = get_password_hash(plain_password)
 
-    # Verificar se já existe utilizador com este e-mail ou username
-    existing = execute_query(
-        """
-        SELECT id
-        FROM users
-        WHERE email = %s OR username = %s
-        """,
-        (email, username),
+    query = """
+        INSERT INTO users (username, email, password_hash, role, is_active)
+        SELECT %s, %s, %s, 'ADMIN', true
+        WHERE NOT EXISTS (
+            SELECT 1 FROM users WHERE email = %s
+        )
+        RETURNING id
+    """
+
+    result = execute_query(
+        query,
+        (username, email, hashed_password, email),
     )
 
-    if existing:
-        user_id = existing[0]["id"]
-
-        # Actualizar dados + reactivar
-        execute_query(
-            """
-            UPDATE users
-            SET username = %s,
-                email = %s,
-                password_hash = %s,
-                role = %s,
-                is_active = true
-            WHERE id = %s
-            """,
-            (username, email, password_hash, role, user_id),
-        )
-        print("Utilizador inicial actualizado com sucesso.")
+    if result:
+        print(f"[seed_admin] Utilizador principal criado: {email}")
     else:
-        # Criar novo utilizador
-        execute_query(
-            """
-            INSERT INTO users (
-                username,
-                email,
-                password_hash,
-                role,
-                is_active,
-                created_at
-            )
-            VALUES (%s, %s, %s, %s, true, NOW())
-            """,
-            (username, email, password_hash, role),
-        )
-        print("Utilizador inicial criado com sucesso.")
-
-    # Desactivar admin antigo (admin/admin123 ou similar)
-    execute_query(
-        """
-        UPDATE users
-        SET is_active = false
-        WHERE username = 'admin'
-          AND email <> %s
-        """,
-        (email,),
-    )
-    print("Admin antigo desactivado (se existia).")
-
-
-if __name__ == "__main__":
-    run()
+        print(f"[seed_admin] Utilizador já existia: {email}")
