@@ -10,7 +10,6 @@ import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from seed_admin import seed_default_user
 
 from auth import create_access_token, verify_password
 from database import execute_query, execute_transaction
@@ -30,7 +29,7 @@ from models import (
 from reporting import export_to_excel, generate_dashboard_charts, generate_pdf_report
 from security import get_current_user, get_admin_user
 from utils import calculate_risk_score, normalize_country, perform_matching
-from seed_admin import run as seed_default_user  # ✅ NOVO IMPORT
+from seed_admin import seed_default_user  # ✅ único import correcto
 
 
 app = FastAPI(
@@ -47,13 +46,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ CRIAR UTILIZADOR PRINCIPAL AUTOMATICAMENTE NO ARRANQUE
-@app.on_event("startup")
-def ensure_default_user():
-    try:
-        seed_default_user()
-    except Exception as e:
-        print(f"[startup] Erro ao garantir utilizador principal: {e}")
 
 @app.get("/")
 async def root():
@@ -596,10 +588,8 @@ async def get_risk_history(
             detail="Erro interno ao obter histórico do assegurado",
         )
 
-# Criar utilizador principal automaticamente no arranque
-from seed_admin import seed_default_user
 
-# Criar utilizador principal automaticamente no arranque
+# ✅ Criar utilizador principal automaticamente no arranque
 @app.on_event("startup")
 def ensure_default_user():
     try:
@@ -607,6 +597,7 @@ def ensure_default_user():
     except Exception as e:
         # Apenas regista o erro, não impede o arranque da API
         print(f"[startup] Erro ao garantir utilizador padrão: {e}")
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
