@@ -1,62 +1,103 @@
+# database.py
 """
-Módulo de autenticação – versão argon2
+Ligação à base de dados PostgreSQL no Railway.
+Usa primeiro DATABASE_URL (se existir) ou então DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT.
 """
 
 import os
-from datetime import datetime, timedelta
-from typing import Dict
+from typing import Any, List, Tuple, Optional
 
-from fastapi import HTTPException, status
-from jose import JWTError, jwt
-from passlib.context import CryptContext
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
-# Secret para assinar os tokens JWT
-SECRET_KEY = os.getenv("AUTH_SECRET", "your-secret-key")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_HOURS = 12
+# 1) Se o Railway fornecer DATABASE_URL, usamos diretamente
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Usar ARGON2 em vez de bcrypt
-pwd_context = CryptContext(
-    schemes=["argon2"],
-    deprecated="auto",
-)
+# 2) Caso contrário, usamos as variáveis que tu configuraste:
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_NAME = os.getenv("DB_NAME", "railway")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_PORT = int(os.getenv("DB_PORT", "5432"))
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
+def get_connection():
     """
-    Verifica se a palavra-passe em texto simples coincide com o hash armazenado.
-    """
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-def get_password_hash(password: str) -> str:
-    """
-    Gera um hash seguro da palavra-passe (argon2).
-    """
-    return pwd_context.hash(password)
-
-
-def create_access_token(data: Dict) -> str:
-    """
-    Cria um token JWT com expiração em ACCESS_TOKEN_EXPIRE_HOURS.
-    """
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-
-def verify_token(token: str) -> Dict:
-    """
-    Decodifica e valida um token JWT.
-    É esta função que o security.py espera importar.
+    Cria uma ligação nova ao PostgreSQL.
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido ou expirado",
+        if DATABASE_URL:
+            # Formato típico: postgres://user:pass@host:port/dbname
+            conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        else:
+            conn = psycopg2.connect(
+                host=DB_HOST,
+                dbname=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                port=DB_PORT,
+                cursor_factory=RealDictCursor,
+            )
+        return conn
+    except Exception as e:
+        # Isto vai aparecer nos Deploy Logs do Railway
+        print(
+            f"[DB] Erro ao conectar com o banco: "
+            f"host={DB_HOST} db={DB_NAME} user={DB_USER} erro={e}"
         )
+        raise
+
+
+def execute_query(sql: str, params: Optional[Tuple[Any, ...]] = None) -> List[dict]:
+    """
+    Executa uma query simples.
+    - Para SELECT: devolve lista de dicionários.
+    - Para INSERT/UPDATE/DELETE: faz commit e devolve [] ou rows se houver RETURNING.
+    """
+    conn = None
+    cur = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(sql, params or ())
+        rows: List[dict] = []
+        # Se houver resultados (SELECT ou RETURNING), lê
+        if cur.description is not None:
+            rows = cur.fetchall()
+        conn.commit()
+        return rows
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[DB] Erro em execute_query: {e} | SQL={sql} | params={params}")
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+def execute_transaction(queries: List[Tuple[str, Tuple[Any, ...]]]) -> None:
+    """
+    Executa várias queries numa única transacção.
+    `queries` = lista de (sql, params).
+    """
+    conn = None
+    cur = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        for sql, params in queries:
+            cur.execute(sql, params or ())
+        conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[DB] Erro em execute_transaction: {e}")
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
