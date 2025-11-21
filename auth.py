@@ -50,7 +50,7 @@ def create_access_token(data: Dict) -> str:
 def verify_token(token: str) -> Dict:
     """
     Decodifica e valida um token JWT.
-    Esta função é usada em security.py (get_current_user).
+    É esta função que o security.py espera importar.
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
